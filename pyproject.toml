@@ -1,136 +1,102 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "snapshot_imager"
-version = "0.2.0"
-description = "Simple python package for imaging visibility data"
+dynamic = ["version"]
+description = "Snapshot imaging of radio interferometric visibilities using non-uniform FFTs"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Tyler Cox", email = "tyler.a.cox@berkeley.edu"},
 ]
 maintainers = [
     {name = "Tyler Cox", email = "tyler.a.cox@berkeley.edu"},
 ]
-keywords = ["radio astronomy", "visibility", "imaging", "interferometry"]
+keywords = ["radio astronomy", "visibility", "imaging", "interferometry", "nufft", "HERA"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-
-# Core dependencies - adjust these based on your actual requirements
 dependencies = [
-    "numpy",
-    "astropy",
-    "finufft",
+    "numpy>=1.23",
+    "astropy>=5.0",
+    "finufft>=2.2",
     "tqdm",
-    "hera-calibration",
+    "hera-calibration>=3.6",
 ]
 
 [project.optional-dependencies]
-# Development dependencies
-dev = [
-    "pytest",
+# GPU acceleration via CuPy + cuFINUFFT (CUDA 12 wheels). For other CUDA
+# versions, install the matching cupy-cudaXXx wheel and cufinufft manually.
+gpu = [
+    "cupy-cuda12x",
+    "cufinufft>=2.2",
+]
+test = [
+    "pytest>=7.0",
     "pytest-cov",
-    "black",
-    "flake8",
-    "mypy",
-    "isort",
 ]
-
-# Documentation dependencies
-docs = [
-    "sphinx",
-    "sphinx-rtd-theme",
-    "numpydoc",
-]
-
-# All optional dependencies
-all = [
-    "snapshot_imager[dev,docs]",
+dev = [
+    "snapshot_imager[test]",
+    "pre-commit",
+    "ruff",
 ]
 
 [project.urls]
-Homepage = "https://github.com/tyler-a-cox/snapshot_imager"
-Repository = "https://github.com/tyler-a-cox/snapshot_imager"
-Issues = "https://github.com/tyler-a-cox/snapshot_imager/issues"
+Homepage = "https://github.com/HERA-Team/snapshot_imager"
+Repository = "https://github.com/HERA-Team/snapshot_imager"
+Issues = "https://github.com/HERA-Team/snapshot_imager/issues"
 
-[tool.setuptools]
-packages = ["snapshot_imager"]
+[tool.setuptools.packages.find]
+include = ["snapshot_imager*"]
 
-[tool.setuptools.package-data]
-snapshot_imager = ["py.typed"]
+[tool.setuptools_scm]
+# Version is derived from git tags (e.g. v0.2.0). Untagged commits get a
+# ".devN+g<hash>" version. The fallback is used when git metadata is missing.
+fallback_version = "0.0.0"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -q --strict-markers"
+addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-
-[tool.black]
-line-length = 88
-target-version = ["py310", "py311", "py312"]
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-)/
-'''
-
-[tool.isort]
-profile = "black"
-line_length = 88
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
-ensure_newline_before_comments = true
-
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-check_untyped_defs = true
-disallow_untyped_decorators = false
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-follow_imports = "normal"
-ignore_missing_imports = true
+markers = [
+    "gpu: tests that require a CUDA GPU with CuPy and cuFINUFFT installed",
+]
 
 [tool.coverage.run]
 source = ["snapshot_imager"]
-omit = ["*/tests/*", "*/test_*.py"]
 
 [tool.coverage.report]
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
-    "raise AssertionError",
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
-    "@abstractmethod",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+# Lint-only (no enforced formatting): pyflakes, core pycodestyle errors,
+# bugbear, pyupgrade, and NumPy-specific checks.
+select = ["E4", "E7", "E9", "F", "B", "UP", "NPY"]
+ignore = [
+    "E741",  # `l`, `m`, `n` are standard direction-cosine names
 ]
