@@ -31,11 +31,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
-    "numpy>=1.23",
-    "astropy>=5.0",
-    "finufft>=2.2",
-    "tqdm",
-    "hera-calibration>=3.6",
+    "numpy>=2.0",
+    "astropy>=6.1",
+    "finufft>=2.3",
+    "tqdm>=4.40",
+    "hera-calibration>=3.7.4",
 ]
 
 [project.optional-dependencies]
