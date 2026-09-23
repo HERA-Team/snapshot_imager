@@ -33,7 +33,13 @@ from .imager import (
     snapshot_imager_mfs_type_3,
 )
 
-__version__ = "0.2.0"
+import importlib.metadata as _metadata
+
+try:
+    # Version is set from git tags at build time by setuptools-scm.
+    __version__ = _metadata.version("snapshot_imager")
+except _metadata.PackageNotFoundError:  # pragma: no cover - not installed
+    __version__ = "unknown"
 
 __all__ = [
     # Data models

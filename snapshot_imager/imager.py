@@ -458,9 +458,9 @@ def snapshot_imager_mfs_type_1(
 
     # Process each time step, combining all baselines and frequencies
     for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
-        # Ravel UV coords across all baselines and frequencies
-        u_scaled = np.ravel(imaging_data.u * norm_factor)
-        v_scaled = np.ravel(imaging_data.v * norm_factor)
+        # Ravel UV coords in (nfreqs, nbls) order to match the weighted data below
+        u_scaled = np.ravel(imaging_data.u.T * norm_factor)
+        v_scaled = np.ravel(imaging_data.v.T * norm_factor)
 
         # Prepare weighted data: shape (nfreqs, nbls) -> ravel to (nfreqs*nbls,)
         weighted_data = prepare_weighted_visibilities(
@@ -587,9 +587,9 @@ def snapshot_imager_mfs_type_3(
 
     # Process each time step, combining all baselines and frequencies
     for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
-        # Ravel UV coords across all baselines and frequencies
-        u_scaled = np.ravel(imaging_data.u * norm_factor)
-        v_scaled = np.ravel(imaging_data.v * norm_factor)
+        # Ravel UV coords in (nfreqs, nbls) order to match the weighted data below
+        u_scaled = np.ravel(imaging_data.u.T * norm_factor)
+        v_scaled = np.ravel(imaging_data.v.T * norm_factor)
 
         # Prepare weighted data: shape (nfreqs, nbls) -> ravel to (nfreqs*nbls,)
         weighted_data = prepare_weighted_visibilities(
