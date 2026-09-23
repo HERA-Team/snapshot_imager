@@ -93,7 +93,9 @@ def prepare_weighted_visibilities(
     else:
         weighted_data = vis[:, time_idx, :] * weights[:, time_idx, :]
 
-    return weighted_data.T  # Transpose to (ntimes/nfreqs, nbls)
+    # Transpose to (ntimes/nfreqs, nbls). FINUFFT requires C-contiguous input
+    # and would otherwise copy (and warn) on every execute call.
+    return np.ascontiguousarray(weighted_data.T)
 
 
 def validate_imaging_inputs(
