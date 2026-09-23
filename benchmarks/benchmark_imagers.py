@@ -3,7 +3,8 @@ Benchmark dirty_image on synthetic HERA-like data.
 
 Examples
 --------
-Default size (200 antennas, 10 times, 32 channels, 256x256 all-sky images)::
+Default size (200 antennas, 10 times, 32 channels, 256x256 all-sky images,
+eps=1e-6, Hermitian data as returned by unpack_data_containers)::
 
     python benchmarks/benchmark_imagers.py
 
@@ -29,10 +30,13 @@ from snapshot_imager import ImagingData, dirty_image, get_nufft_library
 C = 299792458.0  # speed of light [m/s]
 
 
-def synthetic_data(nants, ntimes, nfreqs, seed=0, dtype=np.complex128):
+def synthetic_data(
+    nants, ntimes, nfreqs, seed=0, dtype=np.complex128, include_conjugates=False
+):
     """
-    Random coplanar array of ``nants`` antennas within 150 m, with every
-    cross-correlation and its conjugate (as unpack_data_containers returns).
+    Random coplanar array of ``nants`` antennas within 150 m with every
+    cross-correlation, laid out as unpack_data_containers returns it: one row
+    per baseline (Hermitian), or also each conjugate if include_conjugates.
     """
     rng = np.random.default_rng(seed)
     pos = rng.uniform(-150.0, 150.0, (nants, 3))
@@ -40,16 +44,20 @@ def synthetic_data(nants, ntimes, nfreqs, seed=0, dtype=np.complex128):
     a1, a2 = np.triu_indices(nants, 1)
     freqs = np.linspace(100e6, 200e6, nfreqs)
     uvw = (pos[a2] - pos[a1])[:, :, None] * freqs[None, None, :] / C
-    uvw = np.concatenate([uvw, -uvw])
 
     nbls = len(a1)
     vis = rng.standard_normal((nbls, ntimes, nfreqs)) + 1j * rng.standard_normal(
         (nbls, ntimes, nfreqs)
     )
-    vis = np.concatenate([vis, np.conj(vis)]).astype(dtype)
+    if include_conjugates:
+        uvw = np.concatenate([uvw, -uvw])
+        vis = np.concatenate([vis, np.conj(vis)])
+    vis = vis.astype(dtype)
     weights = np.ones(vis.shape)
     times = 2459000.0 + np.arange(ntimes) / 1440.0
-    return ImagingData(vis, weights, uvw, times, freqs)
+    return ImagingData(
+        vis, weights, uvw, times, freqs, hermitian=not include_conjugates
+    )
 
 
 def best_time(func, repeat):
@@ -68,18 +76,30 @@ def main(argv=None):
     parser.add_argument("--nfreqs", type=int, default=32)
     parser.add_argument("--npix", type=int, default=256)
     parser.add_argument("--fov", type=float, default=180.0)
-    parser.add_argument("--eps", type=float, default=1e-13)
+    parser.add_argument("--eps", type=float, default=1e-6)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--single", action="store_true", help="complex64 data")
+    parser.add_argument(
+        "--include-conjugates",
+        action="store_true",
+        help="store conjugate baselines explicitly (pre-0.4 layout)",
+    )
     parser.add_argument("--type3", action="store_true", help="also time Type 3")
     parser.add_argument("--gpu", action="store_true", help="also time the GPU")
     args = parser.parse_args(argv)
 
     dtype = np.complex64 if args.single else np.complex128
-    data = synthetic_data(args.nants, args.ntimes, args.nfreqs, dtype=dtype)
+    data = synthetic_data(
+        args.nants,
+        args.ntimes,
+        args.nfreqs,
+        dtype=dtype,
+        include_conjugates=args.include_conjugates,
+    )
+    layout = "incl. conjugates" if args.include_conjugates else "Hermitian"
     print(
         f"snapshot_imager {snapshot_imager.__version__}: {data.nbls} baselines "
-        f"(incl. conjugates), {data.ntimes} times, {data.nfreqs} channels, "
+        f"({layout}), {data.ntimes} times, {data.nfreqs} channels, "
         f"npix={args.npix}, fov={args.fov}, eps={args.eps:g}, {np.dtype(dtype).name}, "
         f"visibilities {data.vis.nbytes / 1e6:.0f} MB"
     )

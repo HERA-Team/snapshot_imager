@@ -7,6 +7,7 @@ from hera_cal.datacontainer import DataContainer
 
 from snapshot_imager import (
     ImagingData,
+    dirty_image,
     snapshot_imager_type1,
     unpack_data_containers,
     unpack_uvdata,
@@ -44,12 +45,36 @@ def containers():
 
 
 class TestUnpackDataContainers:
-    def test_returns_imaging_data(self, containers):
+    def test_returns_hermitian_data_by_default(self, containers):
         out = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
         assert isinstance(out, ImagingData)
-        # Each baseline is included together with its conjugate
+        # One row per baseline; the conjugates are implied
+        assert out.hermitian is True
+        assert out.shape == (len(ANTPAIRS), NTIMES, NFREQS)
+        assert out.uvw.shape == (len(ANTPAIRS), 3, NFREQS)
+
+    def test_include_conjugates(self, containers):
+        data = containers[0]
+        out = unpack_data_containers(
+            *containers, pol=POL, antpairs=ANTPAIRS, include_conjugates=True
+        )
+        assert out.hermitian is False
         assert out.shape == (2 * len(ANTPAIRS), NTIMES, NFREQS)
-        assert out.uvw.shape == (2 * len(ANTPAIRS), 3, NFREQS)
+        for i, ap in enumerate(ANTPAIRS):
+            np.testing.assert_allclose(out.vis[2 * i], data[ap + (POL,)])
+            np.testing.assert_allclose(out.vis[2 * i + 1], np.conj(data[ap + (POL,)]))
+            np.testing.assert_allclose(out.uvw[2 * i + 1], -out.uvw[2 * i])
+            np.testing.assert_array_equal(out.weights[2 * i + 1], out.weights[2 * i])
+
+    def test_hermitian_rows_match_explicit_layout(self, containers):
+        """The Hermitian layout is the explicit layout without the conjugates."""
+        explicit = unpack_data_containers(
+            *containers, pol=POL, antpairs=ANTPAIRS, include_conjugates=True
+        )
+        hermitian = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
+        np.testing.assert_array_equal(hermitian.vis, explicit.vis[::2])
+        np.testing.assert_array_equal(hermitian.weights, explicit.weights[::2])
+        np.testing.assert_array_equal(hermitian.uvw, explicit.uvw[::2])
 
     def test_defaults_come_from_data_container(self, containers):
         data = containers[0]
@@ -61,8 +86,8 @@ class TestUnpackDataContainers:
         data = containers[0]
         assert set(AUTOS) <= set(data.antpairs())
         out = unpack_data_containers(*containers, pol=POL)
-        # Only the cross-correlations (and their conjugates) are kept
-        assert out.nbls == 2 * len(ANTPAIRS)
+        # Only the cross-correlations are kept
+        assert out.nbls == len(ANTPAIRS)
         baseline_lengths = np.linalg.norm(out.uvw[:, :2, 0], axis=1)
         assert np.all(baseline_lengths > 0)
 
@@ -75,22 +100,13 @@ class TestUnpackDataContainers:
         np.testing.assert_array_equal(out.vis, expected.vis)
         np.testing.assert_array_equal(out.uvw, expected.uvw)
 
-    def test_conjugate_baselines(self, containers):
-        data = containers[0]
-        out = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
-        for i, ap in enumerate(ANTPAIRS):
-            np.testing.assert_allclose(out.vis[2 * i], data[ap + (POL,)])
-            np.testing.assert_allclose(out.vis[2 * i + 1], np.conj(data[ap + (POL,)]))
-            np.testing.assert_allclose(out.uvw[2 * i + 1], -out.uvw[2 * i])
-            np.testing.assert_array_equal(out.weights[2 * i + 1], out.weights[2 * i])
-
     def test_uvw_in_wavelengths(self, containers):
         data = containers[0]
         out = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
         for i, (a1, a2) in enumerate(ANTPAIRS):
             blvec = data.antpos[a2] - data.antpos[a1]
             expected = blvec[:, None] * data.freqs[None, :] / constants.c.value
-            np.testing.assert_allclose(out.uvw[2 * i], expected)
+            np.testing.assert_allclose(out.uvw[i], expected)
 
     def test_weights_use_nsamples_and_flags(self, containers):
         _, flags, nsamples = containers
@@ -98,7 +114,7 @@ class TestUnpackDataContainers:
         for i, ap in enumerate(ANTPAIRS):
             key = ap + (POL,)
             expected = nsamples[key] * (~flags[key]).astype(float)
-            np.testing.assert_allclose(out.weights[2 * i], expected)
+            np.testing.assert_allclose(out.weights[i], expected)
 
     def test_weights_without_nsamples(self, containers):
         _, flags, _ = containers
@@ -107,7 +123,7 @@ class TestUnpackDataContainers:
         )
         for i, ap in enumerate(ANTPAIRS):
             expected = (~flags[ap + (POL,)]).astype(float)
-            np.testing.assert_allclose(out.weights[2 * i], expected)
+            np.testing.assert_allclose(out.weights[i], expected)
 
     def test_time_and_freq_slices(self, containers):
         data = containers[0]
@@ -119,7 +135,7 @@ class TestUnpackDataContainers:
             time_slice=tslice,
             freq_slice=fslice,
         )
-        assert out.shape == (2 * len(ANTPAIRS), 2, 3)
+        assert out.shape == (len(ANTPAIRS), 2, 3)
         np.testing.assert_array_equal(out.times, data.times[tslice])
         np.testing.assert_array_equal(out.freqs, data.freqs[fslice])
         np.testing.assert_allclose(out.vis[0], data[ANTPAIRS[0] + (POL,)][tslice, fslice])
@@ -135,11 +151,29 @@ class TestUnpackDataContainers:
             out.uvw[0], blvec[:, None] * freqs[None, :] / constants.c.value
         )
 
-    def test_output_can_be_imaged(self, containers):
-        out = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
+    @pytest.mark.parametrize("include_conjugates", [False, True])
+    def test_output_can_be_imaged(self, containers, include_conjugates):
+        out = unpack_data_containers(
+            *containers,
+            pol=POL,
+            antpairs=ANTPAIRS,
+            include_conjugates=include_conjugates,
+        )
         result = snapshot_imager_type1(out, npix=16, fov=60.0, verbose=False)
         assert result.shape == (NTIMES, NFREQS, 16, 16)
         assert np.all(np.isfinite(result.images))
+
+    def test_both_layouts_give_the_same_image(self, containers):
+        kwargs = {"pol": POL, "antpairs": ANTPAIRS}
+        hermitian = unpack_data_containers(*containers, **kwargs)
+        explicit = unpack_data_containers(
+            *containers, include_conjugates=True, **kwargs
+        )
+        a = dirty_image(hermitian, 16, 60.0, eps=1e-12).images
+        b = dirty_image(explicit, 16, 60.0, eps=1e-12).images
+        assert a.dtype == np.float64
+        np.testing.assert_allclose(a, b.real, atol=1e-10 * np.abs(b).max())
+        np.testing.assert_allclose(b.imag, 0.0, atol=1e-10 * np.abs(b).max())
 
 
 def test_unpack_uvdata_not_implemented():

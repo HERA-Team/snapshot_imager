@@ -24,13 +24,20 @@ class ImagingData:
         Time stamps (Julian dates), shape (ntimes,)
     freqs : np.ndarray
         Frequency channels in Hz, shape (nfreqs,)
+    hermitian : bool
+        If True, the data holds one baseline of each conjugate pair and the
+        conjugates (uvw -> -uvw, vis -> conj(vis), same weights) are implied.
+        Imaging then uses half the points and returns real-valued images.
+        If False (default), every baseline to be imaged is stored explicitly.
+        ``unpack_data_containers`` returns Hermitian data by default.
     """
     vis: np.ndarray
     weights: np.ndarray
     uvw: np.ndarray
     times: np.ndarray
     freqs: np.ndarray
-    
+    hermitian: bool = False
+
     def __post_init__(self):
         """Validate shapes after initialization."""
         nbls, ntimes, nfreqs = self.vis.shape

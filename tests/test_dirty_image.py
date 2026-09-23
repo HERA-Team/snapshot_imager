@@ -1,9 +1,12 @@
 """Tests for snapshot_imager.dirty_image and its legacy wrappers."""
 
+import inspect
+
 import numpy as np
 import pytest
-from helpers import make_point_source
+from helpers import make_hermitian_pair, make_point_source
 
+import snapshot_imager._engine as engine
 from snapshot_imager import (
     compute_image_grid,
     dirty_image,
@@ -64,7 +67,9 @@ class TestDirtyImage:
     @pytest.mark.parametrize("mfs", [False, True])
     def test_point_source(self, method, mfs):
         ps = make_point_source(npix=33)
-        result = dirty_image(ps.data, ps.npix, ps.fov, method=method, mfs=mfs)
+        result = dirty_image(
+            ps.data, ps.npix, ps.fov, method=method, mfs=mfs, eps=1e-12
+        )
         peak = np.nanmax(result.images.real, axis=(-2, -1))
         m_idx, l_idx = np.unravel_index(
             np.nanargmax(result.images[0, 0].real), (ps.npix, ps.npix)
@@ -105,6 +110,104 @@ class TestDirtyImage:
         assert result.images.dtype == np.complex64
         scale = np.abs(expected.images).max()
         np.testing.assert_allclose(result.images, expected.images, atol=1e-4 * scale)
+
+
+# ---------------------------------------------------------------------------
+# Hermitian data (conjugate baselines implied)
+# ---------------------------------------------------------------------------
+
+
+class TestHermitian:
+    @pytest.mark.parametrize("npix", [32, 33])
+    @pytest.mark.parametrize("mfs", [False, True])
+    @pytest.mark.parametrize("method", ["type1", "type3"])
+    def test_matches_explicit_conjugates(self, method, mfs, npix):
+        hermitian, explicit = make_hermitian_pair()
+        kwargs = {"method": method, "mfs": mfs, "eps": 1e-12}
+        a = dirty_image(hermitian, npix, 180.0, **kwargs).images
+        b = dirty_image(explicit, npix, 180.0, **kwargs).images
+
+        assert a.dtype == np.float64
+        assert b.dtype == np.complex128
+        np.testing.assert_array_equal(np.isnan(a), np.isnan(b))
+        scale = np.nanmax(np.abs(b))
+        np.testing.assert_allclose(a, b.real, atol=1e-10 * scale)
+        np.testing.assert_allclose(b.imag, 0.0, atol=1e-10 * scale)
+
+    def test_rm_phasor_output_is_complex(self):
+        hermitian, explicit = make_hermitian_pair()
+        phasor = np.exp(1j * np.linspace(0, np.pi, hermitian.nfreqs))
+        a = dirty_image(hermitian, 16, 20.0, rm_phasor=phasor, eps=1e-12).images
+        b = dirty_image(explicit, 16, 20.0, rm_phasor=phasor, eps=1e-12).images
+        assert a.dtype == np.complex128
+        np.testing.assert_allclose(a, b, atol=1e-10 * np.abs(b).max())
+
+    @pytest.mark.parametrize("mfs", [False, True])
+    def test_complex64_gives_float32(self, mfs):
+        hermitian, explicit = make_hermitian_pair(dtype=np.complex64)
+        a = dirty_image(hermitian, 16, 20.0, mfs=mfs).images
+        b = dirty_image(explicit, 16, 20.0, mfs=mfs).images
+        assert a.dtype == np.float32
+        np.testing.assert_allclose(a, b.real, atol=1e-4 * np.abs(b).max())
+
+    @pytest.mark.parametrize("mfs", [False, True])
+    def test_point_source(self, mfs):
+        ps = make_point_source(npix=33, hermitian=True)
+        result = dirty_image(ps.data, ps.npix, ps.fov, mfs=mfs, eps=1e-12)
+        peak = result.images[:, :, ps.m_idx, ps.l_idx]
+        # Per channel: unit peak. MFS: summed weights of every visibility,
+        # including the implied conjugates.
+        expected = 2 * ps.data.weights[:, 0, :].sum() if mfs else 1.0
+        np.testing.assert_allclose(peak, expected, rtol=1e-9)
+        assert np.all(result.images[0, 0] <= peak[0, 0] + 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Channel chunking and defaults
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hermitian_layout", [True, False])
+@pytest.mark.parametrize("rm_phasor", [False, True])
+def test_channel_chunking_does_not_change_images(
+    monkeypatch, hermitian_layout, rm_phasor
+):
+    hermitian, explicit = make_hermitian_pair(nfreqs=8)
+    data = hermitian if hermitian_layout else explicit
+    kwargs = {"eps": 1e-12}
+    if rm_phasor:
+        kwargs["rm_phasor"] = np.exp(1j * np.arange(data.nfreqs))
+    expected = dirty_image(data, 16, 20.0, **kwargs).images
+
+    per_channel_bytes = data.nbls * data.ntimes * 16
+    for channels_per_chunk in (1, 3):  # 3 does not divide 8 channels
+        monkeypatch.setattr(
+            engine, "_CHUNK_BYTES", channels_per_chunk * per_channel_bytes
+        )
+        result = dirty_image(data, 16, 20.0, **kwargs).images
+        np.testing.assert_allclose(result, expected, atol=1e-12 * np.abs(expected).max())
+
+
+def test_default_eps_is_1e_6():
+    for func in (
+        dirty_image,
+        snapshot_imager_type1,
+        snapshot_imager_type3,
+        snapshot_imager_mfs_type_1,
+        snapshot_imager_mfs_type_3,
+    ):
+        assert inspect.signature(func).parameters["eps"].default == 1e-6
+
+
+@pytest.mark.parametrize("mfs", [False, True])
+def test_default_eps_accuracy(mfs):
+    hermitian, _ = make_hermitian_pair(nbls=40)
+    precise = dirty_image(hermitian, 64, 180.0, mfs=mfs, eps=1e-12).images
+    default = dirty_image(hermitian, 64, 180.0, mfs=mfs).images
+    scale = np.nanmax(np.abs(precise))
+    np.testing.assert_allclose(
+        np.nan_to_num(default), np.nan_to_num(precise), atol=5e-5 * scale
+    )
 
 
 # ---------------------------------------------------------------------------

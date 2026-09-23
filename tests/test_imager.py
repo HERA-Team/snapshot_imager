@@ -156,7 +156,7 @@ def _peak_index(image):
 def test_point_source_location_and_flux(imager, point_source):
     """A unit point source on a pixel images to that pixel with peak 1."""
     ps = point_source
-    result = imager(ps.data, npix=ps.npix, fov=ps.fov, verbose=False)
+    result = imager(ps.data, npix=ps.npix, fov=ps.fov, eps=1e-12, verbose=False)
 
     for ti in range(ps.data.ntimes):
         for fi in range(ps.data.nfreqs):
@@ -171,7 +171,7 @@ def test_point_source_location_and_flux(imager, point_source):
 def test_mfs_point_source_location(imager, point_source):
     """The MFS image of a point source peaks at the source pixel."""
     ps = point_source
-    result = imager(ps.data, npix=ps.npix, fov=ps.fov, verbose=False)
+    result = imager(ps.data, npix=ps.npix, fov=ps.fov, eps=1e-12, verbose=False)
 
     total_weight = ps.data.weights[:, 0, :].sum()
     for ti in range(ps.data.ntimes):
@@ -185,7 +185,7 @@ def test_mfs_point_source_location(imager, point_source):
 @pytest.mark.parametrize("npix", [32, 33])
 def test_type1_matches_type3(imaging_data, npix):
     """Type 1 and Type 3 NUFFTs evaluate the same DFT on the same grid."""
-    kwargs = {"npix": npix, "fov": 10.0, "verbose": False}
+    kwargs = {"npix": npix, "fov": 10.0, "eps": 1e-12, "verbose": False}
     t1 = snapshot_imager_type1(imaging_data, **kwargs)
     t3 = snapshot_imager_type3(imaging_data, **kwargs)
     np.testing.assert_allclose(t1.images, t3.images, atol=1e-8)
@@ -193,7 +193,7 @@ def test_type1_matches_type3(imaging_data, npix):
 
 @pytest.mark.parametrize("npix", [16, 17])
 def test_mfs_type1_matches_mfs_type3(imaging_data_small, npix):
-    kwargs = {"npix": npix, "fov": 10.0, "verbose": False}
+    kwargs = {"npix": npix, "fov": 10.0, "eps": 1e-12, "verbose": False}
     t1 = snapshot_imager_mfs_type_1(imaging_data_small, **kwargs)
     t3 = snapshot_imager_mfs_type_3(imaging_data_small, **kwargs)
     np.testing.assert_allclose(t1.images, t3.images, atol=1e-8)
@@ -204,7 +204,7 @@ def test_type1_matches_direct_dft(imaging_data_small, npix):
     """Compare the Type 1 imager against a brute-force DFT."""
     fov = 10.0
     result = snapshot_imager_type1(
-        imaging_data_small, npix=npix, fov=fov, verbose=False
+        imaging_data_small, npix=npix, fov=fov, eps=1e-12, verbose=False
     )
 
     lgrid, mgrid = np.meshgrid(result.l_coords, result.m_coords)
@@ -244,7 +244,7 @@ def test_each_snapshot_is_normalized_separately(imager):
         ps.data.vis, weights, ps.data.uvw, ps.data.times, ps.data.freqs
     )
 
-    result = imager(data, npix=ps.npix, fov=ps.fov, verbose=False)
+    result = imager(data, npix=ps.npix, fov=ps.fov, eps=1e-12, verbose=False)
     peaks = result.images[:, :, ps.m_idx, ps.l_idx].real
     np.testing.assert_allclose(peaks, 1.0, atol=1e-8)
 
