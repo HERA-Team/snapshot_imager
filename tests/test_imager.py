@@ -1,11 +1,15 @@
 """Tests for the imaging algorithms in snapshot_imager.imager."""
 
+import warnings
+
 import numpy as np
 import pytest
+from helpers import make_point_source
 
 from snapshot_imager import (
     ImageResult,
     ImagingData,
+    compute_image_grid,
     snapshot_imager_mfs_type_1,
     snapshot_imager_mfs_type_3,
     snapshot_imager_type1,
@@ -178,24 +182,27 @@ def test_mfs_point_source_location(imager, point_source):
         np.testing.assert_allclose(image.imag, 0.0, atol=1e-6)
 
 
-def test_type1_matches_type3(imaging_data):
+@pytest.mark.parametrize("npix", [32, 33])
+def test_type1_matches_type3(imaging_data, npix):
     """Type 1 and Type 3 NUFFTs evaluate the same DFT on the same grid."""
-    kwargs = {"npix": 32, "fov": 10.0, "verbose": False}
+    kwargs = {"npix": npix, "fov": 10.0, "verbose": False}
     t1 = snapshot_imager_type1(imaging_data, **kwargs)
     t3 = snapshot_imager_type3(imaging_data, **kwargs)
     np.testing.assert_allclose(t1.images, t3.images, atol=1e-8)
 
 
-def test_mfs_type1_matches_mfs_type3(imaging_data_small):
-    kwargs = {"npix": 16, "fov": 10.0, "verbose": False}
+@pytest.mark.parametrize("npix", [16, 17])
+def test_mfs_type1_matches_mfs_type3(imaging_data_small, npix):
+    kwargs = {"npix": npix, "fov": 10.0, "verbose": False}
     t1 = snapshot_imager_mfs_type_1(imaging_data_small, **kwargs)
     t3 = snapshot_imager_mfs_type_3(imaging_data_small, **kwargs)
     np.testing.assert_allclose(t1.images, t3.images, atol=1e-8)
 
 
-def test_type1_matches_direct_dft(imaging_data_small):
+@pytest.mark.parametrize("npix", [8, 9])
+def test_type1_matches_direct_dft(imaging_data_small, npix):
     """Compare the Type 1 imager against a brute-force DFT."""
-    npix, fov = 8, 10.0
+    fov = 10.0
     result = snapshot_imager_type1(
         imaging_data_small, npix=npix, fov=fov, verbose=False
     )
@@ -203,8 +210,9 @@ def test_type1_matches_direct_dft(imaging_data_small):
     lgrid, mgrid = np.meshgrid(result.l_coords, result.m_coords)
     d = imaging_data_small
     for fi in range(d.nfreqs):
+        # Imaging kernel for V ∝ exp(+2πi(ul + vm)) (pyuvdata convention)
         kernel = np.exp(
-            2j
+            -2j
             * np.pi
             * (
                 d.u[:, fi, None, None] * lgrid[None]
@@ -213,6 +221,73 @@ def test_type1_matches_direct_dft(imaging_data_small):
         )
         weighted = d.vis[:, :, fi] * d.weights[:, :, fi]
         dirty = np.einsum("bt,bml->tml", weighted, kernel)
-        psf = np.einsum("bt,bml->tml", d.weights[:, :, fi], kernel)
-        expected = dirty / psf.real.max()
+        # Each snapshot is normalized by its own summed weights (PSF peak)
+        expected = dirty / d.weights[:, :, fi].sum(axis=0)[:, None, None]
         np.testing.assert_allclose(result.images[:, fi], expected, atol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("imager", PER_FREQ_IMAGERS)
+def test_each_snapshot_is_normalized_separately(imager):
+    """Time-varying flags must not change a snapshot's flux scale."""
+    ps = make_point_source(ntimes=3)
+    nbls = ps.data.nbls // 2
+    weights = ps.data.weights.copy()
+    # Flag a third of the baselines (and their conjugates) at t=1 only
+    flagged = np.r_[0 : nbls // 3, nbls : nbls + nbls // 3]
+    weights[flagged, 1, :] = 0.0
+    data = ImagingData(
+        ps.data.vis, weights, ps.data.uvw, ps.data.times, ps.data.freqs
+    )
+
+    result = imager(data, npix=ps.npix, fov=ps.fov, verbose=False)
+    peaks = result.images[:, :, ps.m_idx, ps.l_idx].real
+    np.testing.assert_allclose(peaks, 1.0, atol=1e-8)
+
+
+@pytest.mark.parametrize("imager", ALL_IMAGERS)
+def test_complex64_input(imager):
+    """Single-precision visibilities run in single precision, without warnings."""
+    double = make_point_source(npix=16, fov=20.0, l_idx=11, m_idx=4)
+    single = make_point_source(
+        npix=16, fov=20.0, l_idx=11, m_idx=4, dtype=np.complex64
+    )
+    kwargs = {"npix": 16, "fov": 20.0, "verbose": False}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = imager(single.data, **kwargs)
+    expected = imager(double.data, **kwargs)
+
+    assert result.images.dtype == np.complex64
+    # Single precision runs at eps >= 1e-6; Type 3 on older FINUFFT is ~5e-5
+    scale = np.abs(expected.images).max()
+    np.testing.assert_allclose(result.images, expected.images, atol=1e-4 * scale)
+
+
+@pytest.mark.parametrize("imager", ALL_IMAGERS)
+def test_pixels_below_horizon_are_nan(imager, imaging_data_small):
+    npix, fov = 32, 180.0
+    result = imager(imaging_data_small, npix=npix, fov=fov, verbose=False)
+
+    _, _, lgrid, mgrid = compute_image_grid(npix, fov)
+    below = lgrid**2 + mgrid**2 > 1
+    assert below.any()
+    assert np.all(np.isnan(result.images[:, :, below]))
+    assert np.all(np.isfinite(result.images[:, :, ~below]))
+
+
+def test_type1_modeord_1_is_fft_ordered(imaging_data_small):
+    """modeord=1 gives the same image (and NaN mask) in FFT ordering."""
+    kwargs = {"npix": 17, "fov": 180.0, "verbose": False}
+    centered = snapshot_imager_type1(imaging_data_small, modeord=0, **kwargs)
+    fft_ordered = snapshot_imager_type1(imaging_data_small, modeord=1, **kwargs)
+    np.testing.assert_allclose(
+        np.fft.fftshift(fft_ordered.images, axes=(-2, -1)),
+        centered.images,
+        atol=1e-10,
+    )
