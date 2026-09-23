@@ -114,10 +114,13 @@ class TestDirtyImage:
 
 @pytest.mark.parametrize("legacy, kwargs", LEGACY)
 def test_legacy_matches_dirty_image(imaging_data_small, legacy, kwargs):
-    """The legacy functions return exactly what dirty_image returns."""
+    """The legacy functions return what dirty_image returns."""
     old = legacy(imaging_data_small, npix=17, fov=20.0, verbose=False)
     new = dirty_image(imaging_data_small, 17, 20.0, **kwargs)
-    np.testing.assert_array_equal(old.images, new.images)
+    # Not bitwise: FINUFFT's multithreaded spreading sums in a run-dependent
+    # order, so repeated runs can differ at the ~1e-15 level.
+    scale = np.abs(new.images).max()
+    np.testing.assert_allclose(old.images, new.images, rtol=0, atol=1e-12 * scale)
     assert (old.npix, old.fov) == (new.npix, new.fov)
     if kwargs["method"] == "type3":
         # Legacy Type 3 functions report the flattened coordinates of every pixel
