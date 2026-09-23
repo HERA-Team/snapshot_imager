@@ -22,6 +22,10 @@ pip install "snapshot-imager[gpu]"
 
 For other CUDA versions, install the matching CuPy wheel (e.g. `cupy-cuda11x` or `cupy-cuda13x`) and `cufinufft` yourself.
 
+> **macOS note:** on Apple-silicon Macs, use Python 3.13 or newer. The healpy wheels
+> for Python 3.10–3.12 (installed via `hera_cal`) bundle their own OpenMP runtime,
+> which conflicts with FINUFFT's and crashes on the first imaging call.
+
 To install from source:
 
 ```bash
