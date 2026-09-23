@@ -1,7 +1,8 @@
 name: Publish to PyPI
 
 # Pushing a version tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`)
-# builds the sdist + wheel and uploads them to PyPI via trusted publishing.
+# builds the sdist + wheel, uploads them to PyPI via trusted publishing, and
+# creates a GitHub Release whose notes are the version's CHANGELOG.md section.
 on:
   push:
     tags: ["v*"]
@@ -37,10 +38,29 @@ jobs:
             exit 1
           }
 
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            /^## \[/ { if (found) exit; found = (index($0, "## [" ver "]") == 1); next }
+            /^\[[^]]+\]: / { if (found) exit }
+            found
+          ' CHANGELOG.md | sed -e '/./,$!d' > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' section"
+            exit 1
+          fi
+          cat release-notes.md
+
       - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
 
   publish:
     name: Upload to PyPI
@@ -58,3 +78,28 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub Release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release and upload assets
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md
