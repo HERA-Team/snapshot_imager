@@ -5,7 +5,6 @@ This module contains common functionality used by multiple imaging methods,
 including library selection, plan management, and coordinate scaling.
 """
 import numpy as np
-from typing import Tuple, Optional
 
 
 def get_nufft_library(use_cupy: bool = False):
@@ -59,8 +58,8 @@ def get_nufft_library(use_cupy: bool = False):
 def prepare_weighted_visibilities(
     vis: np.ndarray,
     weights: np.ndarray,
-    freq_idx: Optional[int] = None,
-    time_idx: Optional[int] = None
+    freq_idx: int | None = None,
+    time_idx: int | None = None
 ) -> np.ndarray:
     """
     Prepare weighted visibilities for a specific frequency.

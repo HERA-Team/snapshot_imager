@@ -4,7 +4,6 @@ Data models for snapshot imaging.
 This module defines structured data containers for visibility data and imaging results.
 """
 from dataclasses import dataclass
-from typing import Optional
 import numpy as np
 
 

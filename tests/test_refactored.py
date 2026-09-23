@@ -12,13 +12,11 @@ import astropy.units as u
 from snapshot_imager import (
     ImagingData,
     ImageResult,
-    unpack_data_containers,
     phase_track_to_source,
     snapshot_imager_type1,
     snapshot_imager_type3,
     snapshot_imager_mfs_type_1,
     snapshot_imager_mfs_type_3,
-    estimate_memory_requirements,
     compute_image_grid,
     compute_baseline_extent,
 )
