@@ -43,7 +43,7 @@ dependencies = [
 # versions, install the matching cupy-cudaXXx wheel and cufinufft manually.
 gpu = [
     "cupy-cuda12x",
-    "cufinufft>=2.2",
+    "cufinufft>=2.4",  # type 3 support on GPU
 ]
 test = [
     "pytest>=7.0",
