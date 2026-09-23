@@ -1,6 +1,7 @@
 """Tests for snapshot_imager.core utilities."""
 
 import sys
+import types
 
 import finufft
 import numpy as np
@@ -20,14 +21,29 @@ class TestGetNufftLibrary:
         assert nufft_lib is finufft
         assert use_gpu is False
 
-    def test_falls_back_to_cpu_without_cupy(self, monkeypatch, capsys):
+    def test_falls_back_to_cpu_without_cupy(self, monkeypatch):
         # A None entry in sys.modules makes `import cupy` raise ImportError
         monkeypatch.setitem(sys.modules, "cupy", None)
-        xp, nufft_lib, use_gpu = get_nufft_library(use_cupy=True)
+        with pytest.warns(RuntimeWarning, match="falling back to CPU"):
+            xp, nufft_lib, use_gpu = get_nufft_library(use_cupy=True)
         assert xp is np
         assert nufft_lib is finufft
         assert use_gpu is False
-        assert "falling back to CPU" in capsys.readouterr().out
+
+    def test_falls_back_to_cpu_without_gpu_device(self, monkeypatch):
+        """CuPy and cuFINUFFT installed, but no CUDA device available."""
+        fake_cupy = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                runtime=types.SimpleNamespace(getDeviceCount=lambda: 0)
+            )
+        )
+        monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+        monkeypatch.setitem(sys.modules, "cufinufft", types.SimpleNamespace())
+        with pytest.warns(RuntimeWarning, match="no CUDA device"):
+            xp, nufft_lib, use_gpu = get_nufft_library(use_cupy=True)
+        assert xp is np
+        assert nufft_lib is finufft
+        assert use_gpu is False
 
 
 class TestPrepareWeightedVisibilities:

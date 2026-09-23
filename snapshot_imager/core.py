@@ -28,32 +28,13 @@ def get_nufft_library(use_cupy: bool = False):
     
     Notes
     -----
-    If CuPy/cuFINUFFT are requested but not available, falls back to
-    CPU version with a warning.
+    If CuPy/cuFINUFFT are requested but cannot be imported, or no CUDA
+    device is available, falls back to the CPU with a RuntimeWarning.
     """
-    if use_cupy:
-        try:
-            import cupy as cp
-            import cufinufft
-            xp = cp
-            nufft_lib = cufinufft
-            use_gpu = True
-            print("Using GPU acceleration with CuPy/cuFINUFFT")
-        except ImportError:
-            print("Warning: CuPy/cuFINUFFT not available, falling back to CPU")
-            import numpy as np
-            import finufft
-            xp = np
-            nufft_lib = finufft
-            use_gpu = False
-    else:
-        import numpy as np
-        import finufft
-        xp = np
-        nufft_lib = finufft
-        use_gpu = False
-    
-    return xp, nufft_lib, use_gpu
+    from ._engine import get_backend
+
+    backend = get_backend(use_cupy)
+    return backend.xp, backend.nufft, backend.gpu
 
 def prepare_weighted_visibilities(
     vis: np.ndarray,

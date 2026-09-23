@@ -1,33 +1,161 @@
 """
-Snapshot imaging algorithms using Non-Uniform FFT (NUFFT).
+Snapshot imaging with non-uniform FFTs (NUFFTs).
 
-This module implements different snapshot imaging algorithms for radio
-interferometry data. All algorithms use FINUFFT for efficient computation
-and support optional GPU acceleration via CuPy.
+:func:`dirty_image` is the main entry point. It makes dirty images on a regular
+(l, m) grid, either one image per channel or one multi-frequency synthesis
+(MFS) image combining all channels, using FINUFFT on the CPU or cuFINUFFT on
+the GPU.
 
 Sign convention: visibilities are assumed to follow the pyuvdata/pyuvsim
 convention used for HERA data, uvw = xyz(ant2) - xyz(ant1) and
 V ∝ exp(+2πi (u*l + v*m + w*n)), so the dirty image is formed with the
-kernel exp(-2πi (u*l + v*m)) (FINUFFT ``isign=-1``).
+kernel exp(-2πi (u*l + v*m)).
 
 Pixels outside the visible sky (l**2 + m**2 > 1, which only occurs for
-fov > 90 degrees) are set to NaN in every imager's output.
+fov > 90 degrees) are set to NaN.
+
+The functions ``snapshot_imager_type1``, ``snapshot_imager_type3``,
+``snapshot_imager_mfs_type_1`` and ``snapshot_imager_mfs_type_3`` are kept for
+backwards compatibility; they are thin wrappers around :func:`dirty_image`
+with their original defaults and outputs.
 """
+
+from __future__ import annotations
+
+from dataclasses import replace
+
 import numpy as np
-import tqdm
 
-from .data_models import ImagingData, ImageResult
-from .coordinates import _below_horizon, compute_image_grid
-from .core import (
-    _normalize_by_weights,
-    _nufft_dtypes,
-    get_nufft_library,
-    prepare_weighted_visibilities,
-    validate_imaging_inputs,
+from ._engine import (
+    METHODS,
+    GridTransform,
+    get_backend,
+    image_mfs,
+    image_per_channel,
 )
+from .coordinates import _below_horizon, compute_baseline_extent, compute_image_grid
+from .core import _nufft_dtypes, validate_imaging_inputs
+from .data_models import ImageResult, ImagingData
 
-# Imaging kernel sign: exp(-2πi(ul + vm)) for V ∝ exp(+2πi(ul + vm + wn)).
-_ISIGN = -1
+
+def dirty_image(
+    data: ImagingData,
+    npix: int = 256,
+    fov: float = 180.0,
+    *,
+    mfs: bool = False,
+    method: str = "type1",
+    eps: float = 1e-13,
+    use_gpu: bool = False,
+    rm_phasor: np.ndarray | None = None,
+    verbose: bool = False,
+) -> ImageResult:
+    """
+    Make dirty images from visibility data.
+
+    Parameters
+    ----------
+    data : ImagingData
+        Visibilities, weights, and uvw coordinates to image.
+    npix : int, optional
+        Number of pixels along each image axis. Default is 256.
+    fov : float, optional
+        Field of view in degrees (0 < fov <= 180), centered on the phase
+        center. Default is 180 (the whole visible sky).
+    mfs : bool, optional
+        If False (default), make one image per channel, each snapshot
+        normalized by its summed weights. If True, combine all channels into
+        one multi-frequency synthesis image per time (not normalized).
+    method : {"type1", "type3"}, optional
+        NUFFT used to evaluate the image. "type1" (default) is much faster on
+        a regular grid; "type3" evaluates the same sum directly at the pixel
+        positions and is mainly useful for validation.
+    eps : float, optional
+        NUFFT tolerance. Default is 1e-13. Single-precision (complex64) data
+        is imaged in single precision with a tolerance of at least 1e-6.
+    use_gpu : bool, optional
+        Image on the GPU with CuPy and cuFINUFFT. Falls back to the CPU with a
+        warning if they are unavailable. Default is False.
+    rm_phasor : np.ndarray, optional
+        Complex array of shape (nfreqs,). If given (only with ``mfs=False``),
+        each channel's image is multiplied by ``rm_phasor[fi]`` and the
+        channels are summed, e.g. for rotation-measure synthesis.
+    verbose : bool, optional
+        Show a progress bar. Default is False.
+
+    Returns
+    -------
+    ImageResult
+        ``images`` has shape (ntimes, nfreqs, npix, npix), or
+        (ntimes, 1, npix, npix) for MFS or with ``rm_phasor``, indexed
+        ``images[time, freq, m, l]``. ``l_coords`` and ``m_coords`` are the
+        pixel direction cosines, shape (npix,). With ``mfs=False``, a unit
+        point source has peak 1 and fully flagged snapshots are zero.
+        Pixels below the horizon are NaN.
+
+    Notes
+    -----
+    Pixel ``npix // 2`` along each axis is the phase center (l = m = 0); see
+    :func:`~snapshot_imager.compute_image_grid` for the grid definition.
+    """
+    validate_imaging_inputs(data.vis, data.weights, data.u, data.v, npix, fov)
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+    if rm_phasor is not None:
+        if mfs:
+            raise ValueError("rm_phasor cannot be combined with mfs=True")
+        rm_phasor = np.asarray(rm_phasor)
+        if rm_phasor.shape != (data.nfreqs,):
+            raise ValueError(
+                f"rm_phasor must have shape ({data.nfreqs},), got {rm_phasor.shape}"
+            )
+
+    backend = get_backend(use_gpu)
+    complex_dtype, _, eps = _nufft_dtypes(data.vis.dtype, eps)
+    transform = GridTransform(
+        backend,
+        npix,
+        fov,
+        n_trans=1 if mfs else data.ntimes,
+        method=method,
+        eps=eps,
+        complex_dtype=complex_dtype,
+        uv_extent=compute_baseline_extent(data.u, data.v) if method == "type3" else None,
+    )
+
+    if mfs:
+        images = image_mfs(data, transform, verbose=verbose)
+    else:
+        images = image_per_channel(data, transform, rm_phasor=rm_phasor, verbose=verbose)
+
+    lcoords, mcoords, lgrid, mgrid = compute_image_grid(npix, fov)
+    images[:, :, _below_horizon(lgrid, mgrid)] = np.nan
+
+    if mfs or rm_phasor is not None:
+        freqs = np.array([np.mean(data.freqs)])
+    else:
+        freqs = np.asarray(data.freqs)
+
+    return ImageResult(
+        images=images,
+        l_coords=lcoords,
+        m_coords=mcoords,
+        fov=fov,
+        npix=npix,
+        times=np.asarray(data.times),
+        freqs=freqs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Legacy interface
+# ---------------------------------------------------------------------------
+
+
+def _flattened_coords(result: ImageResult) -> ImageResult:
+    """Legacy Type 3 results report the flattened (l, m) of every pixel."""
+    _, _, lgrid, mgrid = compute_image_grid(result.npix, result.fov)
+    return replace(result, l_coords=np.ravel(lgrid), m_coords=np.ravel(mgrid))
 
 
 def snapshot_imager_type1(
@@ -37,16 +165,15 @@ def snapshot_imager_type1(
     eps: float = 1e-13,
     use_cupy: bool = False,
     modeord: int = 0,
-    verbose=True,
-    rm_phasor: np.ndarray = None,
+    verbose: bool = True,
+    rm_phasor: np.ndarray | None = None,
 ) -> ImageResult:
     """
-    Snapshot imager using Type 1 NUFFT with plan reuse.
-    
-    Type 1 NUFFT transforms from non-uniform points (UV coordinates) to
-    a uniform grid (image pixels). This is the most efficient approach
-    for snapshot imaging when the output grid is regular.
-    
+    Per-channel snapshot imager using a Type 1 NUFFT.
+
+    Kept for backwards compatibility; equivalent to
+    ``dirty_image(imaging_data, npix, fov, method="type1", ...)``.
+
     Parameters
     ----------
     imaging_data : ImagingData
@@ -60,10 +187,11 @@ def snapshot_imager_type1(
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
     modeord : int, optional
-        Mode ordering: 0 for FINUFFT default (centered, matching ``l_coords``
-        and ``m_coords``), 1 for FFT-style ordering (apply ``np.fft.fftshift``
-        over the last two axes to match the returned coordinates).
-        Default is 0.
+        Pixel ordering: 0 (default) is centered, matching ``l_coords`` and
+        ``m_coords``; 1 is FFT-style ordering (apply ``np.fft.fftshift`` over
+        the last two axes to match the returned coordinates).
+    verbose : bool, optional
+        Show a progress bar. Default is True.
     rm_phasor : np.ndarray, optional
         Optional complex array of shape (nfreqs,). If provided, each channel's
         image is multiplied by ``rm_phasor[fi]`` and the channels are summed
@@ -73,103 +201,23 @@ def snapshot_imager_type1(
     Returns
     -------
     ImageResult
-        Container with image cube and coordinate information. Each snapshot
-        is normalized by its summed weights (the peak of its synthesized
-        beam), so a unit point source has peak 1; fully flagged snapshots are
-        zero. Pixels below the horizon are NaN.
-
-    Notes
-    -----
-    This algorithm creates a FINUFFT Plan once per frequency channel and
-    processes all time samples together using the n_trans parameter for
-    optimal performance.
-
-    The UV coordinates are scaled by 4π·sin(fov/2)/npix for Type 1 NUFFT.
+        See :func:`dirty_image`.
     """
-    # Validate inputs
-    validate_imaging_inputs(
-        imaging_data.vis,
-        imaging_data.weights,
-        imaging_data.u,
-        imaging_data.v,
+    if modeord not in (0, 1):
+        raise ValueError(f"modeord must be 0 or 1, got {modeord}")
+    result = dirty_image(
+        imaging_data,
         npix,
-        fov
+        fov,
+        method="type1",
+        eps=eps,
+        use_gpu=use_cupy,
+        rm_phasor=rm_phasor,
+        verbose=verbose,
     )
-    
-    # Get appropriate libraries
-    xp, nufft_lib, use_gpu = get_nufft_library(use_cupy)
-    
-    # Extract dimensions
-    nbls, ntimes, nfreqs = imaging_data.shape
-    complex_dtype, real_dtype, eps = _nufft_dtypes(imaging_data.vis.dtype, eps)
-
-    # Set up the image grid
-    lcoords, mcoords, lgrid, mgrid = compute_image_grid(npix, fov)
-
-    # Pre-allocate output array
-    if rm_phasor is not None:
-        image_stack = np.zeros((ntimes, 1, npix, npix), dtype=complex_dtype)
-    else:
-        image_stack = np.zeros((ntimes, nfreqs, npix, npix), dtype=complex_dtype)
-
-    # Compute the normalization factor for Type 1 NUFFT
-    l_max = np.sin(np.deg2rad(fov / 2))
-    norm_factor = 4 * np.pi / npix * l_max
-
-    # Process each frequency
-    for fi in tqdm.tqdm(range(nfreqs), desc="Imaging frequencies", disable=not verbose):
-        # Get and scale UV coordinates for this frequency
-        u_scaled = (imaging_data.u[:, fi] * norm_factor).astype(real_dtype)
-        v_scaled = (imaging_data.v[:, fi] * norm_factor).astype(real_dtype)
-
-        # Weighted data for all times, shape (ntimes, nbls)
-        weighted_data = prepare_weighted_visibilities(
-            imaging_data.vis,
-            imaging_data.weights,
-            freq_idx=fi
-        ).astype(complex_dtype, copy=False)
-
-        # Peak of each snapshot's synthesized beam, shape (ntimes,)
-        sum_weights = imaging_data.weights[:, :, fi].sum(axis=0)
-
-        plan = nufft_lib.Plan(
-            1,
-            (npix, npix),
-            n_trans=ntimes,
-            eps=eps,
-            isign=_ISIGN,
-            dtype=complex_dtype,
-            modeord=modeord
-        )
-
-        if use_gpu:
-            plan.setpts(xp.asarray(u_scaled), xp.asarray(v_scaled))
-            output = xp.asnumpy(plan.execute(xp.asarray(weighted_data)))
-        else:
-            plan.setpts(u_scaled, v_scaled)
-            output = plan.execute(weighted_data)
-
-        # Type 1 output is indexed (time, l, m); images are stored as (time, m, l)
-        output = _normalize_by_weights(
-            np.transpose(output, axes=(0, 2, 1)), sum_weights
-        )
-        if rm_phasor is not None:
-            image_stack[:, 0, :, :] += output * rm_phasor[fi]
-        else:
-            image_stack[:, fi, :, :] = output
-
-    below_horizon = _below_horizon(lgrid, mgrid)
     if modeord == 1:
-        below_horizon = np.fft.ifftshift(below_horizon)
-    image_stack[:, :, below_horizon] = np.nan
-
-    return ImageResult(
-        images=image_stack,
-        l_coords=lcoords,
-        m_coords=mcoords,
-        fov=fov,
-        npix=npix
-    )
+        result.images = np.fft.ifftshift(result.images, axes=(-2, -1))
+    return result
 
 
 def snapshot_imager_type3(
@@ -178,15 +226,16 @@ def snapshot_imager_type3(
     fov: float = 180,
     eps: float = 1e-13,
     use_cupy: bool = False,
-    verbose=True,
+    verbose: bool = True,
 ) -> ImageResult:
     """
-    Snapshot imager using Type 3 NUFFT with plan reuse.
-    
-    Type 3 NUFFT transforms from non-uniform points to non-uniform points.
-    This can be useful for irregular output grids or when evaluating at
-    specific sky positions.
-    
+    Per-channel snapshot imager using a Type 3 NUFFT.
+
+    Kept for backwards compatibility; equivalent to
+    ``dirty_image(imaging_data, npix, fov, method="type3", ...)`` except that
+    ``l_coords`` and ``m_coords`` are the flattened coordinates of every pixel
+    (shape (npix*npix,)).
+
     Parameters
     ----------
     imaging_data : ImagingData
@@ -199,112 +248,25 @@ def snapshot_imager_type3(
         FINUFFT tolerance (precision). Default is 1e-13.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
-    
+    verbose : bool, optional
+        Show a progress bar. Default is True.
+
     Returns
     -------
     ImageResult
-        Container with image cube and coordinate information. Each snapshot
-        is normalized by its summed weights (the peak of its synthesized
-        beam), so a unit point source has peak 1; fully flagged snapshots are
-        zero. Pixels below the horizon are NaN.
-
-    Notes
-    -----
-    Type 3 NUFFT is generally slower than Type 1 for regular output grids,
-    but provides more flexibility in choosing output positions.
-    
-    The output coordinates are flattened (1D arrays) for Type 3.
+        See :func:`dirty_image`.
     """
-    # Validate inputs
-    validate_imaging_inputs(
-        imaging_data.vis,
-        imaging_data.weights,
-        imaging_data.u,
-        imaging_data.v,
+    result = dirty_image(
+        imaging_data,
         npix,
-        fov
+        fov,
+        method="type3",
+        eps=eps,
+        use_gpu=use_cupy,
+        verbose=verbose,
     )
-    
-    # Get appropriate libraries
-    xp, nufft_lib, use_gpu = get_nufft_library(use_cupy)
-    
-    # Extract dimensions
-    nbls, ntimes, nfreqs = imaging_data.shape
-    complex_dtype, real_dtype, eps = _nufft_dtypes(imaging_data.vis.dtype, eps)
+    return _flattened_coords(result)
 
-    # Set up the image grid
-    lcoords, mcoords, lgrid, mgrid = compute_image_grid(npix, fov)
-    lgrid_flat = np.ravel(lgrid)
-    mgrid_flat = np.ravel(mgrid)
-
-    # Get maximum baseline extent for scaling
-    umax = max(np.max(np.abs(imaging_data.u)), np.max(np.abs(imaging_data.v)))
-
-    # Pre-compute grid coordinates scaled by umax
-    lgrid_scaled = (lgrid_flat * umax).astype(real_dtype)
-    mgrid_scaled = (mgrid_flat * umax).astype(real_dtype)
-
-    # Normalization factor
-    norm_factor = 2 * np.pi / umax
-
-    # Pre-allocate output array
-    image_stack = np.zeros((ntimes, nfreqs, npix, npix), dtype=complex_dtype)
-
-    if use_gpu:
-        # Target points are the same for every frequency
-        lgrid_scaled = xp.asarray(lgrid_scaled)
-        mgrid_scaled = xp.asarray(mgrid_scaled)
-
-    # Process each frequency
-    for fi in tqdm.tqdm(range(nfreqs), desc="Imaging frequencies", disable=not verbose):
-        # Scale UV coordinates for this frequency
-        u_scaled = (imaging_data.u[:, fi] * norm_factor).astype(real_dtype)
-        v_scaled = (imaging_data.v[:, fi] * norm_factor).astype(real_dtype)
-
-        # Weighted data for all times, shape (ntimes, nbls)
-        weighted_data = prepare_weighted_visibilities(
-            imaging_data.vis,
-            imaging_data.weights,
-            freq_idx=fi
-        ).astype(complex_dtype, copy=False)
-
-        # Peak of each snapshot's synthesized beam, shape (ntimes,)
-        sum_weights = imaging_data.weights[:, :, fi].sum(axis=0)
-
-        # Type 3 plan in 2 dimensions
-        plan = nufft_lib.Plan(
-            3,
-            2,
-            n_trans=ntimes,
-            eps=eps,
-            isign=_ISIGN,
-            dtype=complex_dtype
-        )
-
-        if use_gpu:
-            plan.setpts(
-                xp.asarray(u_scaled), xp.asarray(v_scaled),
-                s=lgrid_scaled, t=mgrid_scaled
-            )
-            output = xp.asnumpy(plan.execute(xp.asarray(weighted_data)))
-        else:
-            plan.setpts(u_scaled, v_scaled, s=lgrid_scaled, t=mgrid_scaled)
-            output = plan.execute(weighted_data)
-
-        # Reshape and store
-        image_stack[:, fi, :, :] = _normalize_by_weights(
-            output.reshape(ntimes, npix, npix), sum_weights
-        )
-
-    image_stack[:, :, _below_horizon(lgrid, mgrid)] = np.nan
-
-    return ImageResult(
-        images=image_stack,
-        l_coords=lgrid_flat,
-        m_coords=mgrid_flat,
-        fov=fov,
-        npix=npix
-    )
 
 def snapshot_imager_mfs_type_1(
     imaging_data: ImagingData,
@@ -312,15 +274,14 @@ def snapshot_imager_mfs_type_1(
     fov: float = 10,
     eps: float = 1e-13,
     use_cupy: bool = False,
-    verbose=True,
+    verbose: bool = True,
 ) -> ImageResult:
     """
-    Multi-frequency synthesis (MFS) snapshot imager using Type 1 NUFFT with plan reuse.
-    
-    This implementation uses FINUFFT plans for efficient Type 1 NUFFT computation,
-    processing all baselines across all frequencies together for each time step.
-    Supports optional GPU acceleration via CuPy/cuFINUFFT.
-    
+    Multi-frequency synthesis (MFS) snapshot imager using a Type 1 NUFFT.
+
+    Kept for backwards compatibility; equivalent to
+    ``dirty_image(imaging_data, npix, fov, mfs=True, method="type1", ...)``.
+
     Parameters
     ----------
     imaging_data : ImagingData
@@ -333,92 +294,26 @@ def snapshot_imager_mfs_type_1(
         FINUFFT tolerance (precision). Default is 1e-13.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
-    
+    verbose : bool, optional
+        Show a progress bar. Default is True.
+
     Returns
     -------
     ImageResult
-        Container with image cube and coordinate information
-    
-    Notes
-    -----
-    For each time step, all baselines across all frequency channels are
-    concatenated into a single set of non-uniform UV points, producing one
-    wideband MFS image. The output image cube has shape
-    (ntimes, 1, npix, npix).
-
-    MFS images are not normalized: each pixel is the weighted sum of the
-    visibilities (a unit point source peaks at the summed weights). Pixels
-    below the horizon are NaN.
+        One wideband image per time, shape (ntimes, 1, npix, npix). MFS images
+        are not normalized: a unit point source peaks at the summed weights.
     """
-    # Validate inputs
-    validate_imaging_inputs(
-        imaging_data.vis,
-        imaging_data.weights,
-        imaging_data.u,
-        imaging_data.v,
+    return dirty_image(
+        imaging_data,
         npix,
-        fov
+        fov,
+        mfs=True,
+        method="type1",
+        eps=eps,
+        use_gpu=use_cupy,
+        verbose=verbose,
     )
-    
-    # Get appropriate libraries
-    xp, nufft_lib, use_gpu = get_nufft_library(use_cupy)
-    
-    # Extract dimensions
-    nbls, ntimes, nfreqs = imaging_data.shape
-    complex_dtype, real_dtype, eps = _nufft_dtypes(imaging_data.vis.dtype, eps)
 
-    # Set up the image grid
-    lcoords, mcoords, lgrid, mgrid = compute_image_grid(npix, fov)
-
-    # Normalization factor
-    l_max = np.sin(np.deg2rad(fov / 2))
-    norm_factor = 4 * np.pi / npix * l_max
-
-    # Pre-allocate output array: one MFS image per time step
-    image_stack = np.zeros((ntimes, 1, npix, npix), dtype=complex_dtype)
-
-    # Process each time step, combining all baselines and frequencies
-    for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
-        # Ravel UV coords in (nfreqs, nbls) order to match the weighted data below
-        u_scaled = np.ravel(imaging_data.u.T * norm_factor).astype(real_dtype)
-        v_scaled = np.ravel(imaging_data.v.T * norm_factor).astype(real_dtype)
-
-        # Prepare weighted data: shape (nfreqs, nbls) -> ravel to (nfreqs*nbls,)
-        weighted_data = np.ravel(prepare_weighted_visibilities(
-            imaging_data.vis,
-            imaging_data.weights,
-            time_idx=ti
-        )).astype(complex_dtype, copy=False)
-
-        plan = nufft_lib.Plan(
-            1,
-            (npix, npix),
-            n_trans=1,
-            eps=eps,
-            isign=_ISIGN,
-            dtype=complex_dtype,
-            modeord=0,
-        )
-
-        if use_gpu:
-            plan.setpts(xp.asarray(u_scaled), xp.asarray(v_scaled))
-            output = xp.asnumpy(plan.execute(xp.asarray(weighted_data)))
-        else:
-            plan.setpts(u_scaled, v_scaled)
-            output = plan.execute(weighted_data)
-
-        # Type 1 output is transposed relative to image convention
-        image_stack[ti, 0, :, :] = output.T
-
-    image_stack[:, :, _below_horizon(lgrid, mgrid)] = np.nan
-
-    return ImageResult(
-        images=image_stack,
-        l_coords=lcoords,
-        m_coords=mcoords,
-        fov=fov,
-        npix=npix
-    )
 
 def snapshot_imager_mfs_type_3(
     imaging_data: ImagingData,
@@ -426,15 +321,16 @@ def snapshot_imager_mfs_type_3(
     fov: float = 10,
     eps: float = 1e-13,
     use_cupy: bool = False,
-    verbose=True,
+    verbose: bool = True,
 ) -> ImageResult:
     """
-    Multi-frequency synthesis (MFS) snapshot imager using Type 3 NUFFT with plan reuse.
-    
-    This implementation uses FINUFFT plans for efficient Type 3 NUFFT computation,
-    processing all baselines across all frequencies together for each time step.
-    Supports optional GPU acceleration via CuPy/cuFINUFFT.
-    
+    Multi-frequency synthesis (MFS) snapshot imager using a Type 3 NUFFT.
+
+    Kept for backwards compatibility; equivalent to
+    ``dirty_image(imaging_data, npix, fov, mfs=True, method="type3", ...)``
+    except that ``l_coords`` and ``m_coords`` are the flattened coordinates of
+    every pixel (shape (npix*npix,)).
+
     Parameters
     ----------
     imaging_data : ImagingData
@@ -447,104 +343,23 @@ def snapshot_imager_mfs_type_3(
         FINUFFT tolerance (precision). Default is 1e-13.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
-    
+    verbose : bool, optional
+        Show a progress bar. Default is True.
+
     Returns
     -------
     ImageResult
-        Container with image cube and coordinate information
-    
-    Notes
-    -----
-    For each time step, all baselines across all frequency channels are
-    concatenated into a single set of non-uniform UV points, producing one
-    wideband MFS image. The output image cube has shape
-    (ntimes, 1, npix, npix).
-
-    MFS images are not normalized: each pixel is the weighted sum of the
-    visibilities (a unit point source peaks at the summed weights). Pixels
-    below the horizon are NaN.
+        One wideband image per time, shape (ntimes, 1, npix, npix). MFS images
+        are not normalized: a unit point source peaks at the summed weights.
     """
-    # Validate inputs
-    validate_imaging_inputs(
-        imaging_data.vis,
-        imaging_data.weights,
-        imaging_data.u,
-        imaging_data.v,
+    result = dirty_image(
+        imaging_data,
         npix,
-        fov
+        fov,
+        mfs=True,
+        method="type3",
+        eps=eps,
+        use_gpu=use_cupy,
+        verbose=verbose,
     )
-    
-    # Get appropriate libraries
-    xp, nufft_lib, use_gpu = get_nufft_library(use_cupy)
-    
-    # Extract dimensions
-    nbls, ntimes, nfreqs = imaging_data.shape
-    complex_dtype, real_dtype, eps = _nufft_dtypes(imaging_data.vis.dtype, eps)
-
-    # Set up the image grid
-    lcoords, mcoords, lgrid, mgrid = compute_image_grid(npix, fov)
-    lgrid_flat = np.ravel(lgrid)
-    mgrid_flat = np.ravel(mgrid)
-
-    # Get maximum baseline extent for scaling
-    umax = max(np.max(np.abs(imaging_data.u)), np.max(np.abs(imaging_data.v)))
-
-    # Pre-compute grid coordinates scaled by umax
-    lgrid_scaled = (lgrid_flat * umax).astype(real_dtype)
-    mgrid_scaled = (mgrid_flat * umax).astype(real_dtype)
-
-    # Compute the normalization factor for Type 3 NUFFT
-    norm_factor = 2 * np.pi / umax
-
-    # Pre-allocate output array: one MFS image per time step
-    image_stack = np.zeros((ntimes, 1, npix, npix), dtype=complex_dtype)
-
-    if use_gpu:
-        # Target points are the same for every time step
-        lgrid_scaled = xp.asarray(lgrid_scaled)
-        mgrid_scaled = xp.asarray(mgrid_scaled)
-
-    # Process each time step, combining all baselines and frequencies
-    for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
-        # Ravel UV coords in (nfreqs, nbls) order to match the weighted data below
-        u_scaled = np.ravel(imaging_data.u.T * norm_factor).astype(real_dtype)
-        v_scaled = np.ravel(imaging_data.v.T * norm_factor).astype(real_dtype)
-
-        # Prepare weighted data: shape (nfreqs, nbls) -> ravel to (nfreqs*nbls,)
-        weighted_data = np.ravel(prepare_weighted_visibilities(
-            imaging_data.vis,
-            imaging_data.weights,
-            time_idx=ti
-        )).astype(complex_dtype, copy=False)
-
-        # Type 3 plan in 2 dimensions
-        plan = nufft_lib.Plan(
-            3,
-            2,
-            n_trans=1,
-            eps=eps,
-            isign=_ISIGN,
-            dtype=complex_dtype
-        )
-
-        if use_gpu:
-            plan.setpts(
-                xp.asarray(u_scaled), xp.asarray(v_scaled),
-                s=lgrid_scaled, t=mgrid_scaled
-            )
-            output = xp.asnumpy(plan.execute(xp.asarray(weighted_data)))
-        else:
-            plan.setpts(u_scaled, v_scaled, s=lgrid_scaled, t=mgrid_scaled)
-            output = plan.execute(weighted_data)
-
-        image_stack[ti, 0, :, :] = output.reshape(npix, npix)
-
-    image_stack[:, :, _below_horizon(lgrid, mgrid)] = np.nan
-
-    return ImageResult(
-        images=image_stack,
-        l_coords=lgrid_flat,
-        m_coords=mgrid_flat,
-        fov=fov,
-        npix=npix
-    )
+    return _flattened_coords(result)
