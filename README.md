@@ -70,6 +70,32 @@ The NUFFT tolerance defaults to `eps=1e-6` (the relative error of the image), fa
 
 The earlier functions `snapshot_imager_type1`, `snapshot_imager_type3`, `snapshot_imager_mfs_type_1`, and `snapshot_imager_mfs_type_3` are still available, with their original defaults and outputs; they are thin wrappers around `dirty_image`.
 
+## Synthesized Beam and Catalog Positions
+
+Pass `return_psf=True` to also get the synthesized beam (point spread function) for every image, normalized like the images (a unit point source at the phase center). It is computed in the same transforms as the images, and only once when the weights don't change with time. `ImageResult.sum_weights` always holds the summed weights per time and channel.
+
+```python
+result = dirty_image(imaging_data, npix=256, fov=180.0, return_psf=True)
+result.psf.shape  # same as result.images
+```
+
+`dirty_image_points` evaluates the same image, or the synthesized beam, at arbitrary directions instead of a grid, for example at catalog sources as they drift through the beam. `radec_to_lmn` gives the direction cosines of sky positions at each time:
+
+```python
+from snapshot_imager import radec_to_lmn, dirty_image_points
+
+# l, m, n have shape (ntimes, nsources)
+l, m, n = radec_to_lmn(ra_deg, dec_deg, imaging_data.times, telescope_location)
+
+# Image values at each source, fluxes.values: (ntimes, nfreqs, nsources)
+fluxes = dirty_image_points(imaging_data, l, m, n)
+
+# Synthesized beam at the offsets of every source from source 0
+beam = dirty_image_points(imaging_data, l - l[:, :1], m - m[:, :1], psf=True)
+```
+
+It evaluates the sum directly for small problems (up to about 3 million baseline–direction pairs per channel, e.g. ~150 directions for 200 antennas) and switches to a Type 3 NUFFT for larger ones (`method="direct"` or `"type3"` to choose). `w_term="unprojected"` (raw drift-scan data, where V ∝ exp(+2πi(ul + vm + wn))) or `w_term="zenith"` (data with the zenith w-phase removed, e.g. absorbed by calibration) includes the w-term for non-coplanar arrays; it is only meaningful when each row has a well-defined w, which is not exactly true for redundantly averaged data.
+
 ## GPU Acceleration
 
 `snapshot_imager` supports GPU-accelerated imaging via [CuPy](https://cupy.dev/) and [cuFINUFFT](https://github.com/flatironinstitute/finufft). Pass `use_gpu=True`:

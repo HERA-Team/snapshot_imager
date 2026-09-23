@@ -131,6 +131,17 @@ class ImageResult:
         Frequencies in Hz along the image frequency axis, shape (nfreqs,).
         For images that combine channels (MFS, or ``rm_phasor``) this is the
         mean frequency of the input channels.
+    psf : np.ndarray, optional
+        Synthesized beam (point spread function) for each image, with the same
+        shape, dtype, and normalization as ``images``: the image a unit point
+        source at the phase center would produce. Only computed when
+        requested (``dirty_image(..., return_psf=True)``). If the weights
+        don't change with time, the beam is computed once and ``psf`` is a
+        read-only view broadcast over the time axis.
+    sum_weights : np.ndarray, optional
+        Summed weights of all imaged visibilities for each time and input
+        channel, shape (ntimes, nchannels), including implied conjugate
+        baselines for Hermitian data. Per-channel images are divided by these.
     """
     images: np.ndarray
     l_coords: np.ndarray
@@ -139,6 +150,8 @@ class ImageResult:
     npix: int
     times: np.ndarray | None = None
     freqs: np.ndarray | None = None
+    psf: np.ndarray | None = None
+    sum_weights: np.ndarray | None = None
 
     @property
     def shape(self):
@@ -154,3 +167,49 @@ class ImageResult:
     def nfreqs(self):
         """Number of frequency channels."""
         return self.images.shape[1]
+
+@dataclass
+class PointsResult:
+    """
+    Dirty-image values (or synthesized-beam values) at arbitrary directions.
+
+    Attributes
+    ----------
+    values : np.ndarray
+        Shape (ntimes, nfreqs, npoints), or (ntimes, 1, npoints) for MFS,
+        indexed ``values[time, freq, point]``. Normalized like the images from
+        ``dirty_image``; NaN for directions outside the visible sky.
+    l, m : np.ndarray
+        Direction cosines (East, North) the values were evaluated at, as
+        passed in: shape (npoints,), or (ntimes, npoints) for directions that
+        change with time. For the synthesized beam these are offsets from the
+        source.
+    n : np.ndarray or None
+        Up direction cosines, if given or used for the w-term.
+    times : np.ndarray
+        Time stamps (Julian dates), shape (ntimes,).
+    freqs : np.ndarray
+        Frequencies in Hz along the frequency axis (the mean input frequency
+        for MFS).
+    sum_weights : np.ndarray
+        Summed weights of all visibilities per (time, input channel), shape
+        (ntimes, nchannels), including implied conjugates for Hermitian data.
+    """
+
+    values: np.ndarray
+    l: np.ndarray
+    m: np.ndarray
+    n: np.ndarray | None
+    times: np.ndarray
+    freqs: np.ndarray
+    sum_weights: np.ndarray
+
+    @property
+    def shape(self):
+        """Shape of ``values``: (ntimes, nfreqs, npoints)."""
+        return self.values.shape
+
+    @property
+    def npoints(self):
+        """Number of directions."""
+        return self.values.shape[-1]

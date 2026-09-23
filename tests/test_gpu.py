@@ -8,11 +8,12 @@ with ``pytest -m gpu``.
 
 import numpy as np
 import pytest
-from helpers import make_point_source
+from helpers import make_hermitian_pair, make_point_source
 
 from snapshot_imager import (
     ImagingData,
     dirty_image,
+    dirty_image_points,
     snapshot_imager_mfs_type_1,
     snapshot_imager_mfs_type_3,
     snapshot_imager_type1,
@@ -87,3 +88,39 @@ def test_fully_flagged_snapshot_is_zero_on_gpu(imaging_data_small):
     data = ImagingData(d.vis, weights, d.uvw, d.times, d.freqs)
     gpu = dirty_image(data, 16, 10.0, use_gpu=True)
     assert np.all(gpu.images[0] == 0)
+
+
+@pytest.mark.parametrize("constant_weights", [True, False])
+@pytest.mark.parametrize("mfs", [False, True])
+def test_psf_gpu_matches_cpu(constant_weights, mfs):
+    hermitian, _ = make_hermitian_pair(nbls=15, ntimes=4, nfreqs=5)
+    if constant_weights:
+        weights = np.repeat(hermitian.weights[:, :1], hermitian.ntimes, axis=1)
+        hermitian = ImagingData(
+            hermitian.vis, weights, hermitian.uvw, hermitian.times, hermitian.freqs,
+            hermitian=True,
+        )
+    kwargs = {"npix": 33, "fov": 180.0, "mfs": mfs, "return_psf": True}
+    cpu = dirty_image(hermitian, **kwargs)
+    gpu = dirty_image(hermitian, use_gpu=True, **kwargs)
+    _assert_close(gpu, cpu, rtol=1e-6)
+    scale = np.nanmax(np.abs(cpu.psf))
+    np.testing.assert_allclose(
+        np.nan_to_num(gpu.psf), np.nan_to_num(cpu.psf), atol=1e-6 * scale
+    )
+
+
+@pytest.mark.parametrize("method", ["direct", "type3"])
+@pytest.mark.parametrize("mfs", [False, True])
+@pytest.mark.parametrize("w_term", [None, "unprojected"])
+@pytest.mark.parametrize("per_time", [False, True])
+def test_points_gpu_matches_cpu(method, mfs, w_term, per_time):
+    hermitian, _ = make_hermitian_pair(nbls=15, ntimes=3, nfreqs=4)
+    rng = np.random.default_rng(0)
+    shape = (hermitian.ntimes, 20) if per_time else (20,)
+    l, m = rng.uniform(-0.5, 0.5, shape), rng.uniform(-0.5, 0.5, shape)
+    kwargs = {"mfs": mfs, "method": method, "w_term": w_term}
+    cpu = dirty_image_points(hermitian, l, m, **kwargs).values
+    gpu = dirty_image_points(hermitian, l, m, use_gpu=True, **kwargs).values
+    assert gpu.dtype == cpu.dtype
+    np.testing.assert_allclose(gpu, cpu, atol=1e-6 * np.abs(cpu).max())
