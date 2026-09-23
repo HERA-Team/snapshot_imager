@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import argparse
 import time
+import warnings
 
 import numpy as np
 
 import snapshot_imager
-from snapshot_imager import ImagingData, dirty_image
+from snapshot_imager import ImagingData, dirty_image, get_nufft_library
 
 C = 299792458.0  # speed of light [m/s]
 
@@ -84,7 +85,18 @@ def main(argv=None):
     )
 
     methods = ["type1", "type3"] if args.type3 else ["type1"]
-    devices = [False, True] if args.gpu else [False]
+    devices = [False]
+    if args.gpu:
+        # Only time the GPU if it is really used (dirty_image would otherwise
+        # fall back to the CPU and the "gpu" rows would be mislabeled).
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _, _, gpu_available = get_nufft_library(use_cupy=True)
+        if gpu_available:
+            devices.append(True)
+        else:
+            reason = str(caught[0].message) if caught else "GPU unavailable"
+            print(f"Skipping GPU timings: {reason}")
     print(f"{'config':32s} {'total [s]':>10s} {'per channel [ms]':>17s}")
     for use_gpu in devices:
         for method in methods:

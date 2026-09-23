@@ -91,6 +91,21 @@ class TestDirtyImage:
         with pytest.raises(ValueError, match="rm_phasor must have shape"):
             dirty_image(imaging_data_small, 16, 10.0, rm_phasor=np.ones(3))
 
+    def test_rm_phasor_complex128_with_complex64_data(self):
+        """A double-precision phasor accumulates into single-precision images."""
+        kwargs = {"npix": 16, "fov": 20.0, "l_idx": 11, "m_idx": 4}
+        single = make_point_source(dtype=np.complex64, **kwargs)
+        double = make_point_source(**kwargs)
+        phasor = np.exp(1j * np.linspace(0, np.pi, single.data.nfreqs))
+        assert phasor.dtype == np.complex128
+
+        result = dirty_image(single.data, 16, 20.0, rm_phasor=phasor)
+        expected = dirty_image(double.data, 16, 20.0, rm_phasor=phasor)
+
+        assert result.images.dtype == np.complex64
+        scale = np.abs(expected.images).max()
+        np.testing.assert_allclose(result.images, expected.images, atol=1e-4 * scale)
+
 
 # ---------------------------------------------------------------------------
 # Legacy wrappers

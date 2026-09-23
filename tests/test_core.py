@@ -45,6 +45,20 @@ class TestGetNufftLibrary:
         assert nufft_lib is finufft
         assert use_gpu is False
 
+    def test_uses_gpu_when_available(self, monkeypatch):
+        fake_cupy = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+            )
+        )
+        fake_cufinufft = types.SimpleNamespace()
+        monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+        monkeypatch.setitem(sys.modules, "cufinufft", fake_cufinufft)
+        xp, nufft_lib, use_gpu = get_nufft_library(use_cupy=True)
+        assert xp is fake_cupy
+        assert nufft_lib is fake_cufinufft
+        assert use_gpu is True
+
 
 class TestPrepareWeightedVisibilities:
     @pytest.fixture
