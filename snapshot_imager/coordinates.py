@@ -58,6 +58,11 @@ def phase_track_to_source(
     
     where (u, v, w) are baseline coordinates in wavelengths and (l, m, n) are
     direction cosines to the source.
+
+    This follows the pyuvdata/pyuvsim convention used for HERA data, where
+    uvw = xyz(ant2) - xyz(ant1) and a source in direction (l, m, n) has
+    visibility V ∝ exp(+2πi (u*l + v*m + w*n)); the correction above therefore
+    brings the source to the phase center.
     """
     # Ensure times are astropy Time objects
     if isinstance(times, np.ndarray):
@@ -127,19 +132,29 @@ def compute_image_grid(npix: int, fov: float, flat_projection: bool = True):
         m = sin(θ_N)
     
     where θ_E and θ_N are angular offsets in the East and North directions.
+
+    Pixel ``npix // 2`` is the phase center (l = m = 0) for both even and odd
+    ``npix``, with pixel offsets ``-(npix // 2), ..., npix - npix // 2 - 1``.
+    This matches FINUFFT's centered (``modeord=0``) mode ordering, so the
+    Type 1 imagers evaluate the image exactly at these coordinates.
     """
+    offsets = np.arange(npix) - npix // 2
     if flat_projection:
         extent = np.sin(np.deg2rad(fov / 2))
-        lcoords = np.linspace(-extent, extent, npix, endpoint=False)
-        mcoords = np.linspace(-extent, extent, npix, endpoint=False)
+        lcoords = offsets * (2 * extent / npix)
     else:
         extent = np.deg2rad(fov / 2)
-        lcoords = np.sin(np.linspace(-extent, extent, npix, endpoint=False))
-        mcoords = np.sin(np.linspace(-extent, extent, npix, endpoint=False))
-    
+        lcoords = np.sin(offsets * (2 * extent / npix))
+    mcoords = lcoords.copy()
+
     lgrid, mgrid = np.meshgrid(lcoords, mcoords)
     
     return lcoords, mcoords, lgrid, mgrid
+
+
+def _below_horizon(lgrid: np.ndarray, mgrid: np.ndarray) -> np.ndarray:
+    """Mask of image pixels outside the visible sky (l**2 + m**2 > 1)."""
+    return lgrid**2 + mgrid**2 > 1
 
 
 def compute_baseline_extent(u: np.ndarray, v: np.ndarray) -> float:

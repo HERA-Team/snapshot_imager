@@ -45,15 +45,11 @@ class TestPhaseTracking:
         )
         np.testing.assert_allclose(phased_time, phased)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Sign mismatch: phase_track_to_source applies exp(-2*pi*i*(u*l+v*m+w*n)) "
-            "while the imagers use the exp(+2*pi*i*(u*l+v*m)) kernel, so tracking "
-            "moves the source to twice its offset instead of the image center."
-        ),
-    )
     def test_tracked_source_moves_to_image_center(self, telescope_location):
+        """
+        A source simulated with the pyuvdata/pyuvsim convention images at its
+        true (l, m) position, and phase tracking moves it to the image center.
+        """
         import astropy.units as u
         from astropy.coordinates import AltAz, SkyCoord
         from astropy.time import Time
@@ -73,20 +69,30 @@ class TestPhaseTracking:
         bl = rng.uniform(-60, 60, (40, 3))
         bl[:, 2] = 0.0
         uvw = np.concatenate([bl, -bl])[:, :, None]
-        vis = np.exp(-2j * np.pi * (uvw[:, 0] * l0 + uvw[:, 1] * m0))[:, None, :]
+        # pyuvsim: V = exp(+2πi uvw·lmn) with uvw = enu(ant2) - enu(ant1)
+        vis = np.exp(2j * np.pi * (uvw[:, 0] * l0 + uvw[:, 1] * m0))[:, None, :]
         weights = np.ones(vis.shape)
         freqs = np.array([150e6])
 
+        def peak_lm(v):
+            result = snapshot_imager_type1(
+                ImagingData(v, weights, uvw, times, freqs),
+                npix=64,
+                fov=30.0,
+                verbose=False,
+            )
+            image = result.images[0, 0].real
+            m_idx, l_idx = np.unravel_index(np.argmax(image), image.shape)
+            return result.l_coords[l_idx], result.m_coords[m_idx]
+
+        # Before tracking: the source is at its true position (to within a pixel)
+        pixel = 2 * np.sin(np.deg2rad(15.0)) / 64
+        l_peak, m_peak = peak_lm(vis)
+        assert abs(l_peak - l0) <= pixel and abs(m_peak - m0) <= pixel
+
+        # After tracking: the source is at the image center
         tracked = phase_track_to_source(vis, uvw, times, ra, dec, telescope_location)
-        result = snapshot_imager_type1(
-            ImagingData(tracked, weights, uvw, times, freqs),
-            npix=64,
-            fov=30.0,
-            verbose=False,
-        )
-        image = result.images[0, 0].real
-        m_idx, l_idx = np.unravel_index(np.argmax(image), image.shape)
-        assert (m_idx, l_idx) == (32, 32)
+        assert peak_lm(tracked) == (0.0, 0.0)
 
 
 class TestImageGrid:
@@ -110,11 +116,34 @@ class TestImageGrid:
         assert np.all(np.abs(lcoords) <= extent)
         assert np.all(np.abs(mcoords) <= extent)
 
-    def test_center_pixel_is_origin(self):
-        npix = 64
-        lcoords, mcoords, _, _ = compute_image_grid(npix=npix, fov=20.0)
-        assert lcoords[npix // 2] == pytest.approx(0.0, abs=1e-15)
-        assert mcoords[npix // 2] == pytest.approx(0.0, abs=1e-15)
+    @pytest.mark.parametrize("flat_projection", [True, False])
+    @pytest.mark.parametrize("npix", [64, 65])
+    def test_center_pixel_is_origin(self, npix, flat_projection):
+        lcoords, mcoords, _, _ = compute_image_grid(
+            npix=npix, fov=20.0, flat_projection=flat_projection
+        )
+        assert lcoords[npix // 2] == 0.0
+        assert mcoords[npix // 2] == 0.0
+
+    @pytest.mark.parametrize("npix", [64, 65])
+    def test_uniform_pixel_spacing(self, npix):
+        fov = 20.0
+        lcoords, _, _, _ = compute_image_grid(npix=npix, fov=fov)
+        spacing = 2 * np.sin(np.deg2rad(fov / 2)) / npix
+        np.testing.assert_allclose(np.diff(lcoords), spacing)
+
+    def test_odd_npix_grid_is_symmetric(self):
+        lcoords, _, _, _ = compute_image_grid(npix=65, fov=20.0)
+        np.testing.assert_allclose(lcoords, -lcoords[::-1], atol=1e-15)
+
+    def test_even_npix_grid_is_unchanged(self):
+        """Even-npix grids match the previous linspace definition."""
+        npix, fov = 64, 20.0
+        extent = np.sin(np.deg2rad(fov / 2))
+        lcoords, _, _, _ = compute_image_grid(npix=npix, fov=fov)
+        np.testing.assert_allclose(
+            lcoords, np.linspace(-extent, extent, npix, endpoint=False), atol=1e-15
+        )
 
     def test_grid_orientation(self):
         """Rows index m and columns index l."""

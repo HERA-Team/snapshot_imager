@@ -98,6 +98,47 @@ def prepare_weighted_visibilities(
     return np.ascontiguousarray(weighted_data.T)
 
 
+# Smallest NUFFT tolerance used for single-precision data
+_MIN_EPS_SINGLE = 1e-6
+
+
+def _nufft_dtypes(vis_dtype, eps: float):
+    """
+    Choose NUFFT precision to match the visibilities.
+
+    Returns ``(complex_dtype, real_dtype, eps)``. Single-precision (complex64)
+    visibilities use a single-precision NUFFT with float32 points. Tolerances
+    tighter than ~1e-6 are not achievable in single precision (FINUFFT warns
+    on every plan, and Type 3 accuracy actually degrades on older FINUFFT), so
+    ``eps`` is floored at ``_MIN_EPS_SINGLE`` there.
+    """
+    if np.dtype(vis_dtype) == np.complex64:
+        return np.complex64, np.float32, max(eps, _MIN_EPS_SINGLE)
+    return np.complex128, np.float64, eps
+
+
+def _normalize_by_weights(images: np.ndarray, sum_weights: np.ndarray) -> np.ndarray:
+    """
+    Normalize each snapshot image by its summed visibility weights.
+
+    For non-negative weights the synthesized beam (PSF) of a snapshot peaks at
+    the phase center with value ``sum(weights)``, so this puts every snapshot
+    in units where a unit point source has peak 1. Snapshots with no weight
+    (fully flagged) are set to zero.
+
+    Parameters
+    ----------
+    images : np.ndarray
+        Images with shape (ntimes, npix, npix).
+    sum_weights : np.ndarray
+        Summed weights for each snapshot, shape (ntimes,).
+    """
+    sum_weights = np.asarray(sum_weights)[:, None, None]
+    return np.divide(
+        images, sum_weights, out=np.zeros_like(images), where=sum_weights != 0
+    )
+
+
 def validate_imaging_inputs(
     vis: np.ndarray,
     weights: np.ndarray,

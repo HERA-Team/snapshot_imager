@@ -1,14 +1,14 @@
 """Shared fixtures for the snapshot_imager test suite."""
 
-from dataclasses import dataclass
-
 import astropy.units as u
 import numpy as np
 import pytest
 from astropy.coordinates import EarthLocation
 from astropy.utils import iers
 
-from snapshot_imager import ImagingData, compute_image_grid
+from helpers import make_point_source
+
+from snapshot_imager import ImagingData
 
 # Keep tests hermetic: use astropy's bundled IERS tables (which cover the
 # test epochs) rather than downloading IERS-A from the network.
@@ -45,48 +45,7 @@ def telescope_location():
     return EarthLocation(lat=-30.7215 * u.deg, lon=21.4283 * u.deg, height=1051 * u.m)
 
 
-@dataclass
-class PointSource:
-    """Simulated point-source observation and where it should appear."""
-
-    data: ImagingData
-    npix: int
-    fov: float
-    l_idx: int  # expected column (l) index of the source in the image
-    m_idx: int  # expected row (m) index of the source in the image
-
-
-@pytest.fixture
-def point_source():
-    """
-    Unit-flux point source placed exactly on an image pixel.
-
-    Baselines are coplanar (w = 0) and include their conjugates so the
-    dirty image is real. Visibilities follow V = exp(-2*pi*i*(u*l0 + v*m0)).
-    """
-    npix, fov = 32, 20.0
-    nbls, ntimes, nfreqs = 30, 2, 3
-    rng = np.random.default_rng(1)
-
-    freqs = np.linspace(100e6, 120e6, nfreqs)
-    bl = rng.uniform(-40, 40, (nbls, 3))
-    bl[:, 2] = 0.0
-    uvw = bl[:, :, None] * (freqs / freqs[0])[None, None, :]
-    uvw = np.concatenate([uvw, -uvw])
-
-    lcoords, mcoords, _, _ = compute_image_grid(npix, fov)
-    l_idx, m_idx = 20, 9
-    l0, m0 = lcoords[l_idx], mcoords[m_idx]
-
-    vis = np.exp(-2j * np.pi * (uvw[:, 0, :] * l0 + uvw[:, 1, :] * m0))
-    vis = np.repeat(vis[:, None, :], ntimes, axis=1)
-    weights = np.ones(vis.shape)
-    times = 2459000.0 + np.arange(ntimes) / 1440.0
-
-    return PointSource(
-        data=ImagingData(vis, weights, uvw, times, freqs),
-        npix=npix,
-        fov=fov,
-        l_idx=l_idx,
-        m_idx=m_idx,
-    )
+@pytest.fixture(params=[32, 33], ids=["even-npix", "odd-npix"])
+def point_source(request):
+    """Unit point source on a pixel, for both even and odd image sizes."""
+    return make_point_source(npix=request.param)
