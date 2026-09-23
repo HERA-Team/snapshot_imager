@@ -10,6 +10,62 @@ from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 import astropy.units as u
 
 
+def radec_to_lmn(
+    ra,
+    dec,
+    times,
+    telescope_loc: EarthLocation,
+):
+    """
+    Direction cosines (l, m, n) of sky positions at each time.
+
+    Parameters
+    ----------
+    ra, dec : float or array_like
+        Right ascension and declination (ICRS) in degrees, scalars or arrays
+        of shape (nsrc,).
+    times : np.ndarray or astropy.time.Time
+        Times of the observation, Julian dates if not a ``Time``. Shape
+        (ntimes,).
+    telescope_loc : EarthLocation
+        Location of the telescope.
+
+    Returns
+    -------
+    l, m, n : np.ndarray
+        Direction cosines toward East (l), North (m) and Up (n), each of shape
+        (ntimes, nsrc). ``n`` is the sine of the elevation, so it is negative
+        for positions below the horizon.
+
+    Notes
+    -----
+    These are the coordinates used by the imagers: pass ``l`` and ``m`` (and
+    ``n``) to :func:`~snapshot_imager.dirty_image_points` to evaluate the image
+    at catalog positions, or compare them with ``ImageResult.l_coords`` and
+    ``m_coords``.
+    """
+    if not isinstance(times, Time):
+        times = Time(np.atleast_1d(times), format="jd")
+    times = times.reshape(-1)
+    ra = np.atleast_1d(np.asarray(ra, dtype=float))
+    dec = np.atleast_1d(np.asarray(dec, dtype=float))
+    if ra.shape != dec.shape or ra.ndim != 1:
+        raise ValueError(
+            f"ra and dec must be scalars or 1D arrays of the same shape, "
+            f"got {ra.shape} and {dec.shape}"
+        )
+
+    sources = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+    frame = AltAz(obstime=times[:, None], location=telescope_loc)
+    altaz = sources[None, :].transform_to(frame)
+
+    alt, az = altaz.alt.rad, altaz.az.rad
+    l = np.cos(alt) * np.sin(az)
+    m = np.cos(alt) * np.cos(az)
+    n = np.sin(alt)
+    return l, m, n
+
+
 def phase_track_to_source(
     vis: np.ndarray,
     uvw: np.ndarray,
@@ -51,7 +107,7 @@ def phase_track_to_source(
     The phase rotation is computed using direction cosines (l, m, n) where:
     - l: East direction cosine
     - m: North direction cosine  
-    - n: Up direction cosine (computed from l² + m² + n² = 1)
+    - n: Up direction cosine (the sine of the elevation)
         
     The phase correction applied is:
         exp(-2j * π * (u*l + v*m + w*n))
@@ -64,22 +120,8 @@ def phase_track_to_source(
     visibility V ∝ exp(+2πi (u*l + v*m + w*n)); the correction above therefore
     brings the source to the phase center.
     """
-    # Ensure times are astropy Time objects
-    if isinstance(times, np.ndarray):
-        times = Time(times, format='jd')
-    
-    # Get source position in ICRS frame
-    target = SkyCoord(ra=ra_src * u.deg, dec=dec_src * u.deg, frame='icrs')
-    
-    # Transform to Alt-Az frame for each observation time
-    altaz_frame = AltAz(obstime=times, location=telescope_loc)
-    src_altaz = target.transform_to(altaz_frame)
-    
-    # Compute direction cosines (x=East, y=North, z=Up)
-    # l = East, m = North, n = Up
-    l = np.cos(src_altaz.alt.rad) * np.sin(src_altaz.az.rad)
-    m = np.cos(src_altaz.alt.rad) * np.cos(src_altaz.az.rad)
-    n = np.sqrt(1.0 - l**2 - m**2)
+    # Direction cosines of the source at each time, shape (ntimes,)
+    l, m, n = (x[:, 0] for x in radec_to_lmn(ra_src, dec_src, times, telescope_loc))
     
     # Extract UVW coordinates
     ucoords = uvw[:, 0, :]  # Shape: (nbls, nfreqs)

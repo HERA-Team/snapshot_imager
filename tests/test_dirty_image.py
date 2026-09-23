@@ -8,6 +8,7 @@ from helpers import make_hermitian_pair, make_point_source
 
 import snapshot_imager._engine as engine
 from snapshot_imager import (
+    ImagingData,
     compute_image_grid,
     dirty_image,
     snapshot_imager_mfs_type_1,
@@ -160,6 +161,95 @@ class TestHermitian:
         expected = 2 * ps.data.weights[:, 0, :].sum() if mfs else 1.0
         np.testing.assert_allclose(peak, expected, rtol=1e-9)
         assert np.all(result.images[0, 0] <= peak[0, 0] + 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Synthesized beam and summed weights
+# ---------------------------------------------------------------------------
+
+
+def _unit_visibilities(data):
+    return ImagingData(
+        np.ones_like(data.vis),
+        data.weights,
+        data.uvw,
+        data.times,
+        data.freqs,
+        hermitian=data.hermitian,
+    )
+
+
+def _constant_in_time(data):
+    weights = np.repeat(data.weights[:, :1], data.ntimes, axis=1)
+    return ImagingData(
+        data.vis, weights, data.uvw, data.times, data.freqs, hermitian=data.hermitian
+    )
+
+
+class TestPsf:
+    @pytest.mark.parametrize("layout", ["hermitian", "explicit"])
+    @pytest.mark.parametrize("constant_weights", [True, False])
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{}, {"mfs": True}, {"method": "type3"}, {"rm_phasor": "phasor"}],
+        ids=["per-channel", "mfs", "type3", "rm_phasor"],
+    )
+    def test_psf_is_image_of_unit_visibilities(self, layout, constant_weights, kwargs):
+        hermitian, explicit = make_hermitian_pair(nbls=15, ntimes=4, nfreqs=5)
+        data = hermitian if layout == "hermitian" else explicit
+        if constant_weights:
+            data = _constant_in_time(data)
+        if kwargs.get("rm_phasor") == "phasor":
+            kwargs = {"rm_phasor": np.exp(1j * np.arange(data.nfreqs))}
+
+        result = dirty_image(data, 33, 180.0, return_psf=True, eps=1e-12, **kwargs)
+        expected = dirty_image(_unit_visibilities(data), 33, 180.0, eps=1e-12, **kwargs)
+        plain = dirty_image(data, 33, 180.0, eps=1e-12, **kwargs)
+
+        assert result.psf.shape == result.images.shape
+        assert result.psf.dtype == result.images.dtype
+        np.testing.assert_allclose(
+            np.nan_to_num(result.psf),
+            np.nan_to_num(expected.images),
+            atol=1e-10 * np.nanmax(np.abs(expected.images)),
+        )
+        np.testing.assert_array_equal(np.isnan(result.psf), np.isnan(result.images))
+        # Requesting the beam doesn't change the images
+        np.testing.assert_allclose(
+            np.nan_to_num(result.images), np.nan_to_num(plain.images), atol=1e-12
+        )
+
+    def test_per_channel_psf_peaks_at_one(self):
+        hermitian, _ = make_hermitian_pair(nbls=15, ntimes=4, nfreqs=5)
+        result = dirty_image(hermitian, 33, 180.0, return_psf=True, eps=1e-12)
+        center = result.psf[:, :, 16, 16]
+        has_weight = result.sum_weights > 0
+        np.testing.assert_allclose(center[has_weight], 1.0, rtol=1e-10)
+        np.testing.assert_array_equal(center[~has_weight], 0.0)
+
+    def test_constant_weights_share_one_beam(self):
+        hermitian, _ = make_hermitian_pair(nbls=15, ntimes=4, nfreqs=5)
+        constant = dirty_image(
+            _constant_in_time(hermitian), 16, 20.0, return_psf=True
+        ).psf
+        varying = dirty_image(hermitian, 16, 20.0, return_psf=True).psf
+        assert not constant.flags.writeable  # broadcast over time
+        assert varying.flags.writeable
+        np.testing.assert_array_equal(constant[0], constant[-1])
+
+    def test_psf_is_none_by_default(self, imaging_data_small):
+        assert dirty_image(imaging_data_small, 16, 20.0).psf is None
+
+    def test_sum_weights(self):
+        hermitian, explicit = make_hermitian_pair(nbls=15, ntimes=4, nfreqs=5)
+        a = dirty_image(hermitian, 16, 20.0).sum_weights
+        b = dirty_image(explicit, 16, 20.0).sum_weights
+        assert a.shape == (4, 5)
+        # Implied conjugates count, so both layouts agree
+        np.testing.assert_allclose(a, b)
+        np.testing.assert_allclose(a, 2 * hermitian.weights.sum(axis=0))
+        mfs = dirty_image(hermitian, 16, 20.0, mfs=True).sum_weights
+        np.testing.assert_allclose(mfs, a)
 
 
 # ---------------------------------------------------------------------------
