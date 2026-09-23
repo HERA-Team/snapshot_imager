@@ -4,6 +4,8 @@ Data preprocessing and unpacking utilities.
 This module handles conversion of various data formats into the standard
 ImagingData format used by the imaging algorithms.
 """
+import warnings
+
 import numpy as np
 from astropy import constants
 from hera_cal import datacontainer, utils
@@ -48,23 +50,38 @@ def unpack_data_containers(
     freq_slice : slice, optional
         The frequency slice to be used. Default is slice(0, None).
     antpairs : list[tuple], optional
-        The antenna pairs to be used. If None, will use all antenna pairs.
+        The antenna pairs to be used. If None, will use all cross-correlation
+        antenna pairs in the data container. Autocorrelations are always
+        excluded (with a warning if any are passed here).
     weight_by_nsamples : bool, optional
         Whether to weight the data by nsamples. Default is True.
-    
+
     Returns
     -------
     ImagingData
         Structured container with visibility data ready for imaging.
-    
+
     Notes
     -----
     This function automatically includes both the baseline and its conjugate
     (reversed baseline) to ensure Hermitian symmetry in the visibility data.
+
+    Autocorrelations have zero baseline length, so they carry no spatial
+    information and would only add a constant offset to a dirty image; they
+    are therefore never included.
     """
     if antpairs is None:
-        antpairs = data.antpairs()
-    
+        antpairs = [ap for ap in data.antpairs() if ap[0] != ap[1]]
+    else:
+        n_autos = sum(ap[0] == ap[1] for ap in antpairs)
+        if n_autos:
+            warnings.warn(
+                f"Dropping {n_autos} autocorrelation(s) from antpairs: "
+                "autocorrelations only add a constant offset to dirty images.",
+                stacklevel=2,
+            )
+            antpairs = [ap for ap in antpairs if ap[0] != ap[1]]
+
     if freqs is None:
         freqs = data.freqs
     

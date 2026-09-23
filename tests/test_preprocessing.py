@@ -14,18 +14,21 @@ from snapshot_imager import (
 
 NTIMES, NFREQS = 4, 6
 ANTPAIRS = [(0, 1), (0, 2), (1, 2)]
+AUTOS = [(0, 0), (1, 1), (2, 2)]
 POL = "ee"
 
 
 @pytest.fixture
 def containers():
-    """Synthetic hera_cal DataContainers for data, flags and nsamples."""
+    """Synthetic hera_cal DataContainers (with autocorrelations, like real data)."""
     rng = np.random.default_rng(7)
     shape = (NTIMES, NFREQS)
     data, flags, nsamples = {}, {}, {}
-    for ap in ANTPAIRS:
+    for ap in ANTPAIRS + AUTOS:
         key = ap + (POL,)
         data[key] = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+        if ap in AUTOS:
+            data[key] = np.abs(data[key]) + 100.0  # real and large, like autos
         flags[key] = rng.uniform(size=shape) < 0.2
         nsamples[key] = rng.integers(1, 4, size=shape).astype(float)
 
@@ -51,9 +54,26 @@ class TestUnpackDataContainers:
     def test_defaults_come_from_data_container(self, containers):
         data = containers[0]
         out = unpack_data_containers(*containers, pol=POL)
-        assert out.nbls == 2 * len(data.antpairs())
         np.testing.assert_array_equal(out.freqs, data.freqs)
         np.testing.assert_array_equal(out.times, data.times)
+
+    def test_autocorrelations_excluded_by_default(self, containers):
+        data = containers[0]
+        assert set(AUTOS) <= set(data.antpairs())
+        out = unpack_data_containers(*containers, pol=POL)
+        # Only the cross-correlations (and their conjugates) are kept
+        assert out.nbls == 2 * len(ANTPAIRS)
+        baseline_lengths = np.linalg.norm(out.uvw[:, :2, 0], axis=1)
+        assert np.all(baseline_lengths > 0)
+
+    def test_explicit_autocorrelations_dropped_with_warning(self, containers):
+        expected = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
+        with pytest.warns(UserWarning, match="autocorrelation"):
+            out = unpack_data_containers(
+                *containers, pol=POL, antpairs=ANTPAIRS + AUTOS
+            )
+        np.testing.assert_array_equal(out.vis, expected.vis)
+        np.testing.assert_array_equal(out.uvw, expected.uvw)
 
     def test_conjugate_baselines(self, containers):
         data = containers[0]
@@ -117,7 +137,7 @@ class TestUnpackDataContainers:
 
     def test_output_can_be_imaged(self, containers):
         out = unpack_data_containers(*containers, pol=POL, antpairs=ANTPAIRS)
-        result = snapshot_imager_type1(out, npix=16, fov=90.0, verbose=False)
+        result = snapshot_imager_type1(out, npix=16, fov=60.0, verbose=False)
         assert result.shape == (NTIMES, NFREQS, 16, 16)
         assert np.all(np.isfinite(result.images))
 
