@@ -104,22 +104,35 @@ class ImageResult:
     Attributes
     ----------
     images : np.ndarray
-        Image cube, shape (ntimes, nfreqs, npix, npix)
+        Image cube, shape (ntimes, nfreqs, npix, npix), indexed
+        ``images[time, freq, m, l]``.
     l_coords : np.ndarray
-        L-coordinate values (direction cosine, East), shape (npix,) or (npix*npix,)
+        L-coordinate values (direction cosine, East), shape (npix,). The
+        legacy ``snapshot_imager_type3`` / ``snapshot_imager_mfs_type_3``
+        functions instead return the flattened coordinates of every pixel,
+        shape (npix*npix,).
     m_coords : np.ndarray
-        M-coordinate values (direction cosine, North), shape (npix,) or (npix*npix,)
+        M-coordinate values (direction cosine, North), shape (npix,), or
+        (npix*npix,) for the legacy Type 3 functions.
     fov : float
         Field of view in degrees
     npix : int
         Number of pixels per dimension
+    times : np.ndarray, optional
+        Time stamps (Julian dates) of the images, shape (ntimes,).
+    freqs : np.ndarray, optional
+        Frequencies in Hz along the image frequency axis, shape (nfreqs,).
+        For images that combine channels (MFS, or ``rm_phasor``) this is the
+        mean frequency of the input channels.
     """
     images: np.ndarray
     l_coords: np.ndarray
     m_coords: np.ndarray
     fov: float
     npix: int
-    
+    times: np.ndarray | None = None
+    freqs: np.ndarray | None = None
+
     @property
     def shape(self):
         """Return image cube shape (ntimes, nfreqs, npix, npix)."""

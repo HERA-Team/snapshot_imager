@@ -36,11 +36,10 @@ pip install .
 
 ## Basic Usage
 
-The typical workflow is to unpack HERA `DataContainer` objects into an `ImagingData` container, then pass that to one of the imaging functions.
+The typical workflow is to unpack HERA `DataContainer` objects into an `ImagingData` container, then pass that to `dirty_image`.
 
 ```python
-import numpy as np
-from snapshot_imager import unpack_data_containers, snapshot_imager_type1
+from snapshot_imager import unpack_data_containers, dirty_image
 
 # data, flags, and nsamples are hera_cal DataContainer objects
 imaging_data = unpack_data_containers(
@@ -52,28 +51,30 @@ imaging_data = unpack_data_containers(
     freqs=freqs,
 )
 
-# Produce a (ntimes, nfreqs, npix, npix) image cube
-result = snapshot_imager_type1(
-    imaging_data,
-    npix=256,
-    fov=10.0,       # Field of view in degrees
-    use_cupy=False, # Set to True to use GPU acceleration
-)
+# One image per channel: a (ntimes, nfreqs, npix, npix) cube
+result = dirty_image(imaging_data, npix=256, fov=10.0)
 
-print(result.images.shape)  # (ntimes, nfreqs, npix, npix)
+# One multi-frequency synthesis (MFS) image per time: (ntimes, 1, npix, npix)
+mfs = dirty_image(imaging_data, npix=256, fov=10.0, mfs=True)
+
+print(result.images.shape)
 ```
 
-The returned `ImageResult` contains the image cube along with the corresponding `l_coords` and `m_coords` (direction cosines) for plotting or downstream analysis.
+The returned `ImageResult` holds the image cube (indexed `images[time, freq, m, l]`), the pixel direction cosines `l_coords` and `m_coords`, and the `times` and `freqs` of the images. Per-channel images are normalized so a unit point source has peak 1; MFS images are the unnormalized weighted sum. Pixels below the horizon (only when `fov` > 90°) are NaN.
+
+`dirty_image` uses a Type 1 NUFFT by default; pass `method="type3"` to evaluate the same image with a Type 3 NUFFT (much slower on a regular grid, mainly useful for validation).
+
+The earlier functions `snapshot_imager_type1`, `snapshot_imager_type3`, `snapshot_imager_mfs_type_1`, and `snapshot_imager_mfs_type_3` are still available, with their original defaults and outputs; they are thin wrappers around `dirty_image`.
 
 ## GPU Acceleration
 
-`snapshot_imager` supports GPU-accelerated imaging via [CuPy](https://cupy.dev/) and [cuFINUFFT](https://github.com/flatironinstitute/finufft). Simply pass `use_cupy=True` to any imaging function:
+`snapshot_imager` supports GPU-accelerated imaging via [CuPy](https://cupy.dev/) and [cuFINUFFT](https://github.com/flatironinstitute/finufft). Pass `use_gpu=True`:
 
 ```python
-result = snapshot_imager_type1(imaging_data, npix=256, fov=10.0, use_cupy=True)
+result = dirty_image(imaging_data, npix=256, fov=10.0, use_gpu=True)
 ```
 
-If CuPy or cuFINUFFT are not available, the package will automatically fall back to the CPU implementation with a warning.
+If CuPy or cuFINUFFT are not installed, or no CUDA device is available, it falls back to the CPU with a warning.
 
 ## Development
 
@@ -94,6 +95,12 @@ Lint with [ruff](https://docs.astral.sh/ruff/) (this also runs on every commit v
 
 ```bash
 pre-commit run --all-files
+```
+
+Benchmark the imagers on synthetic HERA-like data (see `--help` for sizes and options):
+
+```bash
+python benchmarks/benchmark_imagers.py
 ```
 
 ## Releasing

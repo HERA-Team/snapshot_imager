@@ -25,8 +25,9 @@ from .core import (
     estimate_memory_requirements,
 )
 
-# Imaging algorithms
+# Imaging
 from .imager import (
+    dirty_image,
     snapshot_imager_type1,
     snapshot_imager_type3,
     snapshot_imager_mfs_type_1,
@@ -55,7 +56,8 @@ __all__ = [
     # Core utilities
     "get_nufft_library",
     "estimate_memory_requirements",
-    # Imaging algorithms
+    # Imaging
+    "dirty_image",
     "snapshot_imager_type1",
     "snapshot_imager_type3",
     "snapshot_imager_mfs_type_1",
