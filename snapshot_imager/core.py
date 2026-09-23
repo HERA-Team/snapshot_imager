@@ -98,28 +98,6 @@ def _nufft_dtypes(vis_dtype, eps: float):
     return np.complex128, np.float64, eps
 
 
-def _normalize_by_weights(images: np.ndarray, sum_weights: np.ndarray) -> np.ndarray:
-    """
-    Normalize each snapshot image by its summed visibility weights.
-
-    For non-negative weights the synthesized beam (PSF) of a snapshot peaks at
-    the phase center with value ``sum(weights)``, so this puts every snapshot
-    in units where a unit point source has peak 1. Snapshots with no weight
-    (fully flagged) are set to zero.
-
-    Parameters
-    ----------
-    images : np.ndarray
-        Images with shape (ntimes, npix, npix).
-    sum_weights : np.ndarray
-        Summed weights for each snapshot, shape (ntimes,).
-    """
-    sum_weights = np.asarray(sum_weights)[:, None, None]
-    return np.divide(
-        images, sum_weights, out=np.zeros_like(images), where=sum_weights != 0
-    )
-
-
 def validate_imaging_inputs(
     vis: np.ndarray,
     weights: np.ndarray,

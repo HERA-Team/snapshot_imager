@@ -45,7 +45,7 @@ def dirty_image(
     *,
     mfs: bool = False,
     method: str = "type1",
-    eps: float = 1e-13,
+    eps: float = 1e-6,
     use_gpu: bool = False,
     rm_phasor: np.ndarray | None = None,
     verbose: bool = False,
@@ -71,8 +71,10 @@ def dirty_image(
         a regular grid; "type3" evaluates the same sum directly at the pixel
         positions and is mainly useful for validation.
     eps : float, optional
-        NUFFT tolerance. Default is 1e-13. Single-precision (complex64) data
-        is imaged in single precision with a tolerance of at least 1e-6.
+        NUFFT tolerance: the relative error of the image. Default is 1e-6,
+        far below the noise in any dirty image; use a smaller value (down to
+        ~1e-14) for validation. Single-precision (complex64) data is imaged in
+        single precision with a tolerance of at least 1e-6.
     use_gpu : bool, optional
         Image on the GPU with CuPy and cuFINUFFT. Falls back to the CPU with a
         warning if they are unavailable. Default is False.
@@ -92,6 +94,12 @@ def dirty_image(
         pixel direction cosines, shape (npix,). With ``mfs=False``, a unit
         point source has peak 1 and fully flagged snapshots are zero.
         Pixels below the horizon are NaN.
+
+        For Hermitian data (``data.hermitian``, the default from
+        :func:`~snapshot_imager.unpack_data_containers`) the images are
+        real-valued (float64, or float32 for complex64 data), except with
+        ``rm_phasor``, whose summed images are complex. Otherwise the images
+        are complex.
 
     Notes
     -----
@@ -162,7 +170,7 @@ def snapshot_imager_type1(
     imaging_data: ImagingData,
     npix: int = 200,
     fov: float = 180,
-    eps: float = 1e-13,
+    eps: float = 1e-6,
     use_cupy: bool = False,
     modeord: int = 0,
     verbose: bool = True,
@@ -183,7 +191,7 @@ def snapshot_imager_type1(
     fov : float, optional
         Field of view in degrees. Default is 180.
     eps : float, optional
-        FINUFFT tolerance (precision). Default is 1e-13.
+        FINUFFT tolerance (precision). Default is 1e-6.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
     modeord : int, optional
@@ -224,7 +232,7 @@ def snapshot_imager_type3(
     imaging_data: ImagingData,
     npix: int = 200,
     fov: float = 180,
-    eps: float = 1e-13,
+    eps: float = 1e-6,
     use_cupy: bool = False,
     verbose: bool = True,
 ) -> ImageResult:
@@ -245,7 +253,7 @@ def snapshot_imager_type3(
     fov : float, optional
         Field of view in degrees. Default is 180.
     eps : float, optional
-        FINUFFT tolerance (precision). Default is 1e-13.
+        FINUFFT tolerance (precision). Default is 1e-6.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
     verbose : bool, optional
@@ -272,7 +280,7 @@ def snapshot_imager_mfs_type_1(
     imaging_data: ImagingData,
     npix: int = 200,
     fov: float = 10,
-    eps: float = 1e-13,
+    eps: float = 1e-6,
     use_cupy: bool = False,
     verbose: bool = True,
 ) -> ImageResult:
@@ -291,7 +299,7 @@ def snapshot_imager_mfs_type_1(
     fov : float, optional
         Field of view in degrees. Default is 10.
     eps : float, optional
-        FINUFFT tolerance (precision). Default is 1e-13.
+        FINUFFT tolerance (precision). Default is 1e-6.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
     verbose : bool, optional
@@ -319,7 +327,7 @@ def snapshot_imager_mfs_type_3(
     imaging_data: ImagingData,
     npix: int = 200,
     fov: float = 10,
-    eps: float = 1e-13,
+    eps: float = 1e-6,
     use_cupy: bool = False,
     verbose: bool = True,
 ) -> ImageResult:
@@ -340,7 +348,7 @@ def snapshot_imager_mfs_type_3(
     fov : float, optional
         Field of view in degrees. Default is 10.
     eps : float, optional
-        FINUFFT tolerance (precision). Default is 1e-13.
+        FINUFFT tolerance (precision). Default is 1e-6.
     use_cupy : bool, optional
         Whether to use GPU acceleration. Default is False.
     verbose : bool, optional

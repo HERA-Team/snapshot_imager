@@ -61,8 +61,11 @@ def test_legacy_gpu_matches_cpu(imager, imaging_data_small):
 @pytest.mark.parametrize("method", ["type1", "type3"])
 @pytest.mark.parametrize("mfs", [False, True])
 @pytest.mark.parametrize("dtype", [np.complex128, np.complex64])
-def test_dirty_image_gpu_matches_cpu(method, mfs, dtype):
-    ps = make_point_source(npix=33, fov=180.0, l_idx=20, m_idx=9, dtype=dtype)
+@pytest.mark.parametrize("hermitian", [True, False])
+def test_dirty_image_gpu_matches_cpu(method, mfs, dtype, hermitian):
+    ps = make_point_source(
+        npix=33, fov=180.0, l_idx=20, m_idx=9, dtype=dtype, hermitian=hermitian
+    )
     kwargs = {"npix": 33, "fov": 180.0, "method": method, "mfs": mfs}
     cpu = dirty_image(ps.data, **kwargs)
     gpu = dirty_image(ps.data, use_gpu=True, **kwargs)

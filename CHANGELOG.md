@@ -7,10 +7,38 @@ releases may include breaking changes; these are listed under **Breaking**.
 
 ## [Unreleased]
 
+Imaging is 4–5× faster per channel and about 2.8× faster for MFS with the new
+defaults. **Image values change slightly** (by a few parts per million, from the
+new default tolerance) and **`unpack_data_containers` returns half as many rows**.
+
+### Breaking
+
+- `unpack_data_containers` returns one row per baseline, with the conjugate
+  baselines implied (`ImagingData.hermitian` is True), instead of storing each
+  baseline and its conjugate. Pass `include_conjugates=True` for the previous
+  layout.
+- Images of Hermitian data are real-valued (float64, or float32 for `complex64`
+  visibilities) instead of complex with a zero imaginary part. Images made
+  with `rm_phasor` are still complex.
+- The default NUFFT tolerance is now `eps=1e-6` (previously `1e-13`) in
+  `dirty_image` and the `snapshot_imager_*` functions, so images change by a few
+  parts per million (relative). Pass `eps=1e-13` for the previous precision.
+
 ### Added
 
+- `ImagingData.hermitian`, and `include_conjugates` in `unpack_data_containers`.
 - This changelog. Pushing a version tag now also creates a GitHub Release whose
   notes are that version's section of this file.
+
+### Performance
+
+- With the new defaults, per-channel imaging is 4–5× faster and MFS about 2.8×
+  faster (benchmark: 200 antennas, 10 times, 32 channels, 256×256 all-sky
+  images). Hermitian data halves the NUFFT points; `eps=1e-6` shrinks the
+  spreading kernel; visibilities are prepared in contiguous channel chunks; and
+  images are written without transposed copies. With conjugates stored
+  explicitly and `eps=1e-13`, the layout changes alone make per-channel
+  imaging 10–15% faster.
 
 ## [0.3.0] - 2026-09-23
 

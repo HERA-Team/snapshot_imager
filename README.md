@@ -62,6 +62,10 @@ print(result.images.shape)
 
 The returned `ImageResult` holds the image cube (indexed `images[time, freq, m, l]`), the pixel direction cosines `l_coords` and `m_coords`, and the `times` and `freqs` of the images. Per-channel images are normalized so a unit point source has peak 1; MFS images are the unnormalized weighted sum. Pixels below the horizon (only when `fov` > 90°) are NaN.
 
+`unpack_data_containers` stores one row per baseline and marks the data as Hermitian (`imaging_data.hermitian`): each baseline's conjugate is implied rather than stored, which halves the memory and imaging work, and the images are real-valued. Pass `include_conjugates=True` to store the conjugate baselines explicitly instead.
+
+The NUFFT tolerance defaults to `eps=1e-6` (the relative error of the image), far below the noise in any dirty image; pass a smaller `eps` (down to about `1e-14`) for validation.
+
 `dirty_image` uses a Type 1 NUFFT by default; pass `method="type3"` to evaluate the same image with a Type 3 NUFFT (much slower on a regular grid, mainly useful for validation).
 
 The earlier functions `snapshot_imager_type1`, `snapshot_imager_type3`, `snapshot_imager_mfs_type_1`, and `snapshot_imager_mfs_type_3` are still available, with their original defaults and outputs; they are thin wrappers around `dirty_image`.

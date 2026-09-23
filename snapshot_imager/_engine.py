@@ -17,7 +17,7 @@ import numpy as np
 import tqdm
 
 from .coordinates import compute_image_grid
-from .core import _normalize_by_weights, prepare_weighted_visibilities
+from .core import prepare_weighted_visibilities
 from .data_models import ImagingData
 
 # Imaging kernel sign: exp(-2πi(ul + vm)) for visibilities that follow the
@@ -157,7 +157,9 @@ class GridTransform:
         x = self.backend.to_device((np.asarray(u) * self._scale).astype(self.real_dtype))
         y = self.backend.to_device((np.asarray(v) * self._scale).astype(self.real_dtype))
         if self.method == "type1":
-            self._plan.setpts(x, y)
+            # Pass v as FINUFFT's first coordinate so the output comes out
+            # indexed (m, l) directly, without a transposed copy.
+            self._plan.setpts(y, x)
         else:
             self._plan = self.backend.nufft.Plan(
                 3,
@@ -178,11 +180,19 @@ class GridTransform:
         data = np.ascontiguousarray(data, dtype=self.complex_dtype)
         data = data.reshape(self.n_trans, -1)
         out = self.backend.to_host(self._plan.execute(self.backend.to_device(data)))
-        out = out.reshape(self.n_trans, self.npix, self.npix)
-        if self.method == "type1":
-            # FINUFFT Type 1 output is indexed (l, m)
-            out = out.transpose(0, 2, 1)
-        return out
+        return out.reshape(self.n_trans, self.npix, self.npix)
+
+
+# Largest block of weighted visibilities prepared at once in image_per_channel
+_CHUNK_BYTES = 128 * 2**20
+
+
+def _channel_chunks(data: ImagingData, itemsize: int):
+    """Yield (start, stop) channel ranges whose data fits in _CHUNK_BYTES."""
+    nbls, ntimes, nfreqs = data.shape
+    size = max(1, min(nfreqs, _CHUNK_BYTES // max(nbls * ntimes * itemsize, 1)))
+    for start in range(0, nfreqs, size):
+        yield start, min(start + size, nfreqs)
 
 
 def image_per_channel(
@@ -197,23 +207,47 @@ def image_per_channel(
 
     Returns an array of shape (ntimes, nfreqs, npix, npix), or
     (ntimes, 1, npix, npix) when ``rm_phasor`` is given (each channel is
-    multiplied by ``rm_phasor[fi]`` and the channels are summed).
+    multiplied by ``rm_phasor[fi]`` and the channels are summed). Images of
+    Hermitian data are real-valued unless ``rm_phasor`` is given.
     """
     _, ntimes, nfreqs = data.shape
-    nout = nfreqs if rm_phasor is None else 1
     npix = transform.npix
-    images = np.zeros((ntimes, nout, npix, npix), dtype=transform.complex_dtype)
+    real_output = data.hermitian and rm_phasor is None
+    dtype = transform.real_dtype if real_output else transform.complex_dtype
+    nout = nfreqs if rm_phasor is None else 1
+    images = np.zeros((ntimes, nout, npix, npix), dtype=dtype)
 
-    for fi in tqdm.tqdm(range(nfreqs), desc="Imaging frequencies", disable=not verbose):
-        transform.set_points(data.u[:, fi], data.v[:, fi])
-        weighted = prepare_weighted_visibilities(data.vis, data.weights, freq_idx=fi)
-        # Peak of each snapshot's synthesized beam, shape (ntimes,)
-        sum_weights = data.weights[:, :, fi].sum(axis=0)
-        image = _normalize_by_weights(transform(weighted), sum_weights)
-        if rm_phasor is None:
-            images[:, fi] = image
-        else:
-            images[:, 0] += image * rm_phasor[fi]
+    progress = tqdm.tqdm(total=nfreqs, desc="Imaging frequencies", disable=not verbose)
+    for start, stop in _channel_chunks(data, transform.complex_dtype.itemsize):
+        # Read the chunk of the cube once, as contiguous (channel, time, baseline)
+        # blocks, instead of gathering strided slices channel by channel.
+        weights = data.weights[:, :, start:stop].astype(transform.real_dtype, copy=False)
+        weighted = np.ascontiguousarray(
+            (data.vis[:, :, start:stop] * weights).transpose(2, 1, 0),
+            dtype=transform.complex_dtype,
+        )
+        # Peak of each snapshot's synthesized beam, shape (channel, time). With
+        # implied conjugates both the image and the beam peak double, so the
+        # factor of 2 cancels in the normalization.
+        sum_weights = weights.sum(axis=0).T[:, :, None, None]
+        u = np.ascontiguousarray(data.u[:, start:stop].T)
+        v = np.ascontiguousarray(data.v[:, start:stop].T)
+
+        for k, fi in enumerate(range(start, stop)):
+            transform.set_points(u[k], v[k])
+            image = transform(weighted[k])
+            if data.hermitian:
+                image = image.real
+            norm = sum_weights[k]
+            if rm_phasor is None:
+                np.divide(image, norm, out=images[:, fi], where=norm != 0)
+            else:
+                channel = np.divide(
+                    image, norm, out=np.zeros_like(image), where=norm != 0
+                )
+                images[:, 0] += channel * rm_phasor[fi]
+            progress.update()
+    progress.close()
 
     return images
 
@@ -224,17 +258,21 @@ def image_mfs(
     """
     Image all channels together into one (unnormalized) image per time.
 
-    Returns an array of shape (ntimes, 1, npix, npix).
+    Returns an array of shape (ntimes, 1, npix, npix), real-valued for
+    Hermitian data.
     """
     _, ntimes, _ = data.shape
     npix = transform.npix
-    images = np.zeros((ntimes, 1, npix, npix), dtype=transform.complex_dtype)
+    dtype = transform.real_dtype if data.hermitian else transform.complex_dtype
+    images = np.zeros((ntimes, 1, npix, npix), dtype=dtype)
 
     # The uv points don't depend on time: set them once, raveled in
     # (nfreqs, nbls) order to match the weighted data below.
     transform.set_points(np.ravel(data.u.T), np.ravel(data.v.T))
     for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
         weighted = prepare_weighted_visibilities(data.vis, data.weights, time_idx=ti)
-        images[ti, 0] = transform(weighted.reshape(1, -1))[0]
+        image = transform(weighted.reshape(1, -1))[0]
+        # Implied conjugates contribute the complex conjugate: 2 * Re(image)
+        images[ti, 0] = 2 * image.real if data.hermitian else image
 
     return images

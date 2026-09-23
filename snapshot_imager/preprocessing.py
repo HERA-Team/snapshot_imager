@@ -24,6 +24,7 @@ def unpack_data_containers(
     freq_slice: slice = slice(0, None),
     antpairs: list = None,
     weight_by_nsamples: bool = True,
+    include_conjugates: bool = False,
 ) -> ImagingData:
     """
     Unpack HERA data containers into imaging format.
@@ -55,6 +56,12 @@ def unpack_data_containers(
         excluded (with a warning if any are passed here).
     weight_by_nsamples : bool, optional
         Whether to weight the data by nsamples. Default is True.
+    include_conjugates : bool, optional
+        If False (default), return one row per baseline with
+        ``hermitian=True``: the conjugate baselines are implied, which halves
+        the memory and imaging work, and images are real-valued. If True,
+        also store each conjugate (reversed) baseline explicitly, with
+        ``hermitian=False`` (the layout used before version 0.4).
 
     Returns
     -------
@@ -63,8 +70,8 @@ def unpack_data_containers(
 
     Notes
     -----
-    This function automatically includes both the baseline and its conjugate
-    (reversed baseline) to ensure Hermitian symmetry in the visibility data.
+    Either way the imaged visibilities are Hermitian: each baseline's
+    conjugate (-uvw, conj(vis)) is either implied or stored explicitly.
 
     Autocorrelations have zero baseline length, so they carry no spatial
     information and would only add a constant offset to a dirty image; they
@@ -108,21 +115,17 @@ def unpack_data_containers(
                 * (~flags[blpol][time_slice, freq_slice]).astype(float)
             )
         
-        # Add both baseline and conjugate
-        vis_list.extend([
-            data[blpol][time_slice, freq_slice],
-            data[utils.reverse_bl(blpol)][time_slice, freq_slice]
-        ])
-        
-        weights_list.extend([weight, weight])
-        
-        # Compute UVW coordinates in wavelengths
-        # Shape: (3, nfreqs) for each baseline
+        # UVW coordinates in wavelengths, shape (3, nfreqs)
         uvw_baseline = blvec[:, None] * freqs[freq_slice][None] / constants.c.value
-        uvw_list.extend([
-            uvw_baseline,
-            -uvw_baseline,
-        ])
+
+        vis_list.append(data[blpol][time_slice, freq_slice])
+        weights_list.append(weight)
+        uvw_list.append(uvw_baseline)
+
+        if include_conjugates:
+            vis_list.append(data[utils.reverse_bl(blpol)][time_slice, freq_slice])
+            weights_list.append(weight)
+            uvw_list.append(-uvw_baseline)
     
     # Stack into arrays with shape (nbls, ntimes, nfreqs) for vis/weights
     # and (nbls, 3, nfreqs) for uvw
@@ -137,7 +140,8 @@ def unpack_data_containers(
         weights=weights,
         uvw=uvw,
         times=times,
-        freqs=freqs_out
+        freqs=freqs_out,
+        hermitian=not include_conjugates,
     )
 
 
