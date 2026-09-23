@@ -6,8 +6,13 @@ import astropy.units as u
 import numpy as np
 import pytest
 from astropy.coordinates import EarthLocation
+from astropy.utils import iers
 
 from snapshot_imager import ImagingData, compute_image_grid
+
+# Keep tests hermetic: use astropy's bundled IERS tables (which cover the
+# test epochs) rather than downloading IERS-A from the network.
+iers.conf.auto_download = False
 
 
 def _random_imaging_data(nbls, ntimes, nfreqs, seed=42):
