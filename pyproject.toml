@@ -59,6 +59,7 @@ dev = [
 Homepage = "https://github.com/HERA-Team/snapshot_imager"
 Repository = "https://github.com/HERA-Team/snapshot_imager"
 Issues = "https://github.com/HERA-Team/snapshot_imager/issues"
+Changelog = "https://github.com/HERA-Team/snapshot_imager/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["snapshot_imager*"]

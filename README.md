@@ -103,19 +103,24 @@ Benchmark the imagers on synthetic HERA-like data (see `--help` for sizes and op
 python benchmarks/benchmark_imagers.py
 ```
 
+## Changelog
+
+User-facing changes are recorded in [CHANGELOG.md](CHANGELOG.md). When a pull request changes behavior, adds a feature, or fixes a bug, add an entry under **Unreleased** (use a **Breaking** subsection for changes that alter results or the API).
+
 ## Releasing
 
-Versions are derived from git tags by [setuptools-scm](https://setuptools-scm.readthedocs.io/), so there is no version string to bump in the code. To publish a release to PyPI:
+Versions are derived from git tags by [setuptools-scm](https://setuptools-scm.readthedocs.io/), so there is no version string to bump in the code. To publish a release:
 
-1. Make sure CI is passing on `main`.
-2. Tag the release commit and push the tag:
+1. In `CHANGELOG.md`, rename **Unreleased** to the new version and date (e.g. `## [0.4.0] - 2026-10-01`), add a fresh empty **Unreleased** section above it, and update the comparison links at the bottom. Merge this to `main`.
+2. Make sure CI is passing on `main`.
+3. Tag the release commit and push the tag:
 
    ```bash
-   git tag -a v0.2.0 -m "v0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.4.0 -m "v0.4.0"
+   git push origin v0.4.0
    ```
 
-3. The [Publish to PyPI](.github/workflows/publish.yml) workflow builds the sdist and wheel and uploads them using PyPI trusted publishing. Optionally, create a GitHub release from the tag to record release notes.
+4. The [Publish to PyPI](.github/workflows/publish.yml) workflow builds the sdist and wheel, uploads them to PyPI using trusted publishing, and creates a GitHub Release whose notes are that version's section of `CHANGELOG.md`. The workflow stops before publishing if the changelog has no section for the tag.
 
 ## License
 
