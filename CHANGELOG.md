@@ -10,6 +10,8 @@ releases may include breaking changes; these are listed under **Breaking**.
 Imaging is 4–5× faster per channel and about 2.8× faster for MFS with the new
 defaults. **Image values change slightly** (by a few parts per million, from the
 new default tolerance) and **`unpack_data_containers` returns half as many rows**.
+It also adds `dirty_image_points` and `radec_to_lmn` for evaluating images at
+catalog positions or along the horizon, and synthesized-beam output.
 
 ### Breaking
 
@@ -26,9 +28,25 @@ new default tolerance) and **`unpack_data_containers` returns half as many rows*
 
 ### Added
 
+- `dirty_image_points`: evaluate the dirty image, or the synthesized beam, at
+  arbitrary directions (fixed, or changing with time such as catalog sources)
+  instead of a grid, by direct summation or a Type 3 NUFFT. Returns a
+  `PointsResult`. An optional w-term (`w_term="unprojected"` or `"zenith"`)
+  handles non-coplanar arrays.
+- `radec_to_lmn`: direction cosines (l, m, n) of RA/Dec positions at given
+  times, for use with `dirty_image_points`.
+- `dirty_image(..., return_psf=True)` returns the synthesized beam for every
+  image (`ImageResult.psf`), computed in the same transforms as the images and
+  only once when the weights don't change with time.
+- `ImageResult.sum_weights`: summed weights per time and channel.
 - `ImagingData.hermitian`, and `include_conjugates` in `unpack_data_containers`.
 - This changelog. Pushing a version tag now also creates a GitHub Release whose
   notes are that version's section of this file.
+
+### Fixed
+
+- `phase_track_to_source` used |n| for sources below the horizon, mirroring
+  them above it; it now uses n = sin(elevation).
 
 ### Performance
 

@@ -195,27 +195,48 @@ def _channel_chunks(data: ImagingData, itemsize: int):
         yield start, min(start + size, nfreqs)
 
 
+def weights_constant_in_time(data: ImagingData) -> bool:
+    """True if every baseline's weights are the same at all times."""
+    if data.ntimes == 1:
+        return True
+    for start, stop in _channel_chunks(data, data.weights.itemsize):
+        chunk = data.weights[:, :, start:stop]
+        if not np.all(chunk == chunk[:, :1]):
+            return False
+    return True
+
+
 def image_per_channel(
     data: ImagingData,
     transform: GridTransform,
     *,
     rm_phasor: np.ndarray | None = None,
+    psf_rows: int = 0,
     verbose: bool = False,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Image every channel; each snapshot is normalized by its summed weights.
 
-    Returns an array of shape (ntimes, nfreqs, npix, npix), or
-    (ntimes, 1, npix, npix) when ``rm_phasor`` is given (each channel is
+    Returns ``(images, psf)``. ``images`` has shape (ntimes, nfreqs, npix, npix),
+    or (ntimes, 1, npix, npix) when ``rm_phasor`` is given (each channel is
     multiplied by ``rm_phasor[fi]`` and the channels are summed). Images of
     Hermitian data are real-valued unless ``rm_phasor`` is given.
+
+    With ``psf_rows`` > 0, the synthesized beam (the image of unit
+    visibilities, normalized the same way) is computed for the first
+    ``psf_rows`` times in the same transforms as the images (the transform
+    must have ``n_trans = ntimes + psf_rows``); ``psf`` then has shape
+    (psf_rows, nfreqs or 1, npix, npix). Otherwise ``psf`` is None.
     """
     _, ntimes, nfreqs = data.shape
     npix = transform.npix
+    if transform.n_trans != ntimes + psf_rows:
+        raise ValueError("transform.n_trans must equal ntimes + psf_rows")
     real_output = data.hermitian and rm_phasor is None
     dtype = transform.real_dtype if real_output else transform.complex_dtype
     nout = nfreqs if rm_phasor is None else 1
     images = np.zeros((ntimes, nout, npix, npix), dtype=dtype)
+    psf = np.zeros((psf_rows, nout, npix, npix), dtype=dtype) if psf_rows else None
 
     progress = tqdm.tqdm(total=nfreqs, desc="Imaging frequencies", disable=not verbose)
     for start, stop in _channel_chunks(data, transform.complex_dtype.itemsize):
@@ -226,6 +247,11 @@ def image_per_channel(
             (data.vis[:, :, start:stop] * weights).transpose(2, 1, 0),
             dtype=transform.complex_dtype,
         )
+        if psf_rows:
+            # The beam is the image of unit visibilities: transform the weights
+            beam_weights = np.ascontiguousarray(
+                weights[:, :psf_rows].transpose(2, 1, 0), dtype=transform.complex_dtype
+            )
         # Peak of each snapshot's synthesized beam, shape (channel, time). With
         # implied conjugates both the image and the beam peak double, so the
         # factor of 2 cancels in the normalization.
@@ -235,44 +261,298 @@ def image_per_channel(
 
         for k, fi in enumerate(range(start, stop)):
             transform.set_points(u[k], v[k])
-            image = transform(weighted[k])
+            block = weighted[k]
+            if psf_rows:
+                block = np.concatenate([block, beam_weights[k]])
+            out = transform(block)
             if data.hermitian:
-                image = image.real
+                out = out.real
             norm = sum_weights[k]
-            if rm_phasor is None:
-                np.divide(image, norm, out=images[:, fi], where=norm != 0)
-            else:
-                channel = np.divide(
-                    image, norm, out=np.zeros_like(image), where=norm != 0
-                )
-                images[:, 0] += channel * rm_phasor[fi]
+            _store(images, fi, out[:ntimes], norm, rm_phasor)
+            if psf_rows:
+                _store(psf, fi, out[ntimes:], norm[:psf_rows], rm_phasor)
             progress.update()
     progress.close()
 
-    return images
+    return images, psf
+
+
+def _store(cube, fi, image, norm, rm_phasor):
+    """Normalize one channel's images into ``cube`` (or accumulate with rm_phasor)."""
+    if rm_phasor is None:
+        np.divide(image, norm, out=cube[:, fi], where=norm != 0)
+    else:
+        channel = np.divide(image, norm, out=np.zeros_like(image), where=norm != 0)
+        cube[:, 0] += channel * rm_phasor[fi]
 
 
 def image_mfs(
-    data: ImagingData, transform: GridTransform, *, verbose: bool = False
-) -> np.ndarray:
+    data: ImagingData,
+    transform: GridTransform,
+    *,
+    psf_rows: int = 0,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Image all channels together into one (unnormalized) image per time.
 
-    Returns an array of shape (ntimes, 1, npix, npix), real-valued for
-    Hermitian data.
+    Returns ``(images, psf)``: images of shape (ntimes, 1, npix, npix),
+    real-valued for Hermitian data, and, if ``psf_rows`` > 0, the synthesized
+    beam for the first ``psf_rows`` times (shape (psf_rows, 1, npix, npix)),
+    otherwise None.
     """
     _, ntimes, _ = data.shape
     npix = transform.npix
     dtype = transform.real_dtype if data.hermitian else transform.complex_dtype
     images = np.zeros((ntimes, 1, npix, npix), dtype=dtype)
+    psf = np.zeros((psf_rows, 1, npix, npix), dtype=dtype) if psf_rows else None
+
+    def combine(image):
+        # Implied conjugates contribute the complex conjugate: 2 * Re(image)
+        return 2 * image.real if data.hermitian else image
 
     # The uv points don't depend on time: set them once, raveled in
     # (nfreqs, nbls) order to match the weighted data below.
     transform.set_points(np.ravel(data.u.T), np.ravel(data.v.T))
     for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
         weighted = prepare_weighted_visibilities(data.vis, data.weights, time_idx=ti)
-        image = transform(weighted.reshape(1, -1))[0]
-        # Implied conjugates contribute the complex conjugate: 2 * Re(image)
-        images[ti, 0] = 2 * image.real if data.hermitian else image
+        images[ti, 0] = combine(transform(weighted.reshape(1, -1))[0])
+    for ti in range(psf_rows):
+        beam_weights = np.ascontiguousarray(data.weights[:, ti, :].T)
+        psf[ti, 0] = combine(transform(beam_weights.reshape(1, -1))[0])
 
-    return images
+    return images, psf
+
+
+# ---------------------------------------------------------------------------
+# Evaluation at arbitrary sky positions
+# ---------------------------------------------------------------------------
+
+POINT_METHODS = ("auto", "direct", "type3")
+
+# method="auto" uses the direct sum when (uv points) x (targets) is at most this
+_DIRECT_MAX_TERMS = 3_000_000
+# Largest (uv points x targets) phase block held in memory by the direct sum
+_PHASE_BLOCK_BYTES = 64 * 2**20
+
+
+class PointTransform:
+    """
+    Evaluate ``sum_j c_j exp(-2πi (u_j l_k + v_j m_k [+ w_j n_k]))`` at
+    arbitrary directions ``(l_k, m_k[, n_k])``.
+
+    The optional w-term follows the pyuvdata/pyuvsim convention for
+    unprojected (drift-scan) data, V ∝ exp(+2πi (u l + v m + w n)).
+
+    Parameters
+    ----------
+    backend : Backend
+        CPU or GPU backend.
+    n_trans : int
+        Number of data vectors transformed per call.
+    method : {"direct", "type3"}
+        "direct" evaluates the sum exactly (a matrix product, best for few
+        targets); "type3" uses a Type 3 NUFFT with tolerance ``eps``.
+    eps : float
+        NUFFT tolerance for "type3".
+    complex_dtype : numpy dtype
+        ``complex128`` or ``complex64``.
+    include_w : bool
+        Include the w-term (requires ``w`` points and ``n`` targets).
+    uv_extent, w_extent : float
+        Largest |u|, |v| and |w| over all points (used by "type3" to keep
+        coordinates well scaled).
+    """
+
+    def __init__(
+        self,
+        backend: Backend,
+        n_trans: int,
+        *,
+        method: str,
+        eps: float,
+        complex_dtype=np.complex128,
+        include_w: bool = False,
+        uv_extent: float = 1.0,
+        w_extent: float = 1.0,
+    ):
+        if method not in ("direct", "type3"):
+            raise ValueError(f"method must be 'direct' or 'type3', got {method!r}")
+        self.backend = backend
+        self.n_trans = n_trans
+        self.method = method
+        self.eps = eps
+        self.complex_dtype = np.dtype(complex_dtype)
+        self.real_dtype = np.float32 if self.complex_dtype == np.complex64 else np.float64
+        self.include_w = include_w
+        self._uv_extent = uv_extent if uv_extent > 0 else 1.0
+        self._w_extent = w_extent if w_extent > 0 else 1.0
+        self._points = None
+        self._targets = None
+        self._plan = None
+        self._phase = None
+
+    def set_points(self, u, v, w=None):
+        """Set the uv(w) points in wavelengths."""
+        coords = [u, v] + ([w] if self.include_w else [])
+        self._points = [np.asarray(c, dtype=self.real_dtype) for c in coords]
+        self._plan = self._phase = None
+
+    def set_targets(self, l, m, n=None):
+        """Set the target direction cosines."""
+        coords = [l, m] + ([n] if self.include_w else [])
+        self._targets = [np.asarray(c, dtype=self.real_dtype) for c in coords]
+        self._plan = self._phase = None
+
+    @property
+    def ntargets(self):
+        return len(self._targets[0])
+
+    def __call__(self, data: np.ndarray) -> np.ndarray:
+        """Transform data of shape (n_trans, npoints) to (n_trans, ntargets)."""
+        data = np.ascontiguousarray(data, dtype=self.complex_dtype)
+        data = data.reshape(self.n_trans, -1)
+        if self.ntargets == 0:
+            return np.zeros((self.n_trans, 0), dtype=self.complex_dtype)
+        if self.method == "direct":
+            return self._direct(data)
+        return self._type3(data)
+
+    def _direct(self, data):
+        xp, be = self.backend.xp, self.backend
+        d = be.to_device(data)
+        npts = len(self._points[0])
+        block = max(1, _PHASE_BLOCK_BYTES // max(npts * self.complex_dtype.itemsize, 1))
+        # Cache the phase matrix when it fits in one block (e.g. MFS, where the
+        # same points and targets are used for every time)
+        if self._phase is None and self.ntargets <= block:
+            self._phase = self._phase_block(0, self.ntargets)
+        out = []
+        for start in range(0, self.ntargets, block):
+            stop = min(start + block, self.ntargets)
+            phase = self._phase if self._phase is not None else self._phase_block(start, stop)
+            out.append(d @ phase)
+        result = out[0] if len(out) == 1 else xp.concatenate(out, axis=1)
+        return be.to_host(result)
+
+    def _phase_block(self, start, stop):
+        xp, be = self.backend.xp, self.backend
+        arg = None
+        for p, t in zip(self._points, self._targets, strict=True):
+            term = be.to_device(p)[:, None] * be.to_device(t[start:stop])[None, :]
+            arg = term if arg is None else arg + term
+        return xp.exp((-2j * np.pi) * arg).astype(self.complex_dtype, copy=False)
+
+    def _type3(self, data):
+        be = self.backend
+        if self._plan is None:
+            # The sum depends only on products point*target, so scale points
+            # by 2π/extent and targets by extent in each dimension.
+            dim = len(self._points)
+            extents = [self._uv_extent, self._uv_extent, self._w_extent][:dim]
+            pts = [
+                be.to_device((p * (2 * np.pi / e)).astype(self.real_dtype))
+                for p, e in zip(self._points, extents, strict=True)
+            ]
+            tgt = [
+                be.to_device((t * e).astype(self.real_dtype))
+                for t, e in zip(self._targets, extents, strict=True)
+            ]
+            self._plan = be.nufft.Plan(
+                3,
+                dim,
+                n_trans=self.n_trans,
+                eps=self.eps,
+                isign=ISIGN,
+                dtype=self.complex_dtype,
+            )
+            if dim == 2:
+                self._plan.setpts(pts[0], pts[1], s=tgt[0], t=tgt[1])
+            else:
+                self._plan.setpts(pts[0], pts[1], pts[2], s=tgt[0], t=tgt[1], u=tgt[2])
+        out = be.to_host(self._plan.execute(be.to_device(data)))
+        return out.reshape(self.n_trans, -1)
+
+
+def evaluate_points(
+    data: ImagingData,
+    transform: PointTransform,
+    l: np.ndarray,
+    m: np.ndarray,
+    n: np.ndarray | None,
+    *,
+    mfs: bool = False,
+    psf: bool = False,
+    verbose: bool = False,
+) -> np.ndarray:
+    """
+    Dirty image (or synthesized beam, with ``psf``) at arbitrary directions.
+
+    ``l``, ``m`` (and ``n``) have shape (npoints,) for the same directions at
+    every time, or (ntimes, npoints) for time-dependent directions; the
+    transform must have ``n_trans = ntimes`` in the first case and 1 in the
+    second (or 1 for MFS). Returns (ntimes, nfreqs or 1, npoints): per-channel
+    values normalized by each snapshot's summed weights, or unnormalized MFS
+    sums; real-valued for Hermitian data.
+    """
+    _, ntimes, nfreqs = data.shape
+    per_time = np.ndim(l) == 2
+    npoints = np.shape(l)[-1]
+    dtype = transform.real_dtype if data.hermitian else transform.complex_dtype
+    nout = 1 if mfs else nfreqs
+    values = np.zeros((ntimes, nout, npoints), dtype=dtype)
+
+    def targets(ti):
+        if not per_time:
+            return l, m, n
+        return l[ti], m[ti], None if n is None else n[ti]
+
+    def real_part(out):
+        return out.real if data.hermitian else out
+
+    if not per_time:
+        transform.set_targets(*targets(0))
+
+    if mfs:
+        transform.set_points(np.ravel(data.u.T), np.ravel(data.v.T), np.ravel(data.w.T))
+        for ti in tqdm.tqdm(range(ntimes), desc="Imaging Times", disable=not verbose):
+            if psf:
+                block = np.ravel(data.weights[:, ti, :].T)
+            else:
+                block = np.ravel(
+                    prepare_weighted_visibilities(data.vis, data.weights, time_idx=ti)
+                )
+            if per_time:
+                transform.set_targets(*targets(ti))
+            out = real_part(transform(block[None])[0])
+            # Implied conjugates contribute the complex conjugate: 2 * Re
+            values[ti, 0] = 2 * out if data.hermitian else out
+        return values
+
+    progress = tqdm.tqdm(total=nfreqs, desc="Imaging frequencies", disable=not verbose)
+    for start, stop in _channel_chunks(data, transform.complex_dtype.itemsize):
+        weights = data.weights[:, :, start:stop].astype(transform.real_dtype, copy=False)
+        source = weights if psf else data.vis[:, :, start:stop] * weights
+        blocks = np.ascontiguousarray(
+            source.transpose(2, 1, 0), dtype=transform.complex_dtype
+        )
+        sum_weights = weights.sum(axis=0).T[:, :, None]
+        u = np.ascontiguousarray(data.u[:, start:stop].T)
+        v = np.ascontiguousarray(data.v[:, start:stop].T)
+        w = np.ascontiguousarray(data.w[:, start:stop].T)
+
+        for k, fi in enumerate(range(start, stop)):
+            transform.set_points(u[k], v[k], w[k])
+            if per_time:
+                out = np.empty((ntimes, npoints), dtype=transform.complex_dtype)
+                for ti in range(ntimes):
+                    transform.set_targets(*targets(ti))
+                    out[ti] = transform(blocks[k, ti][None])[0]
+            else:
+                out = transform(blocks[k])
+            norm = sum_weights[k]
+            # With implied conjugates the factor of 2 cancels in the normalization
+            np.divide(real_part(out), norm, out=values[:, fi], where=norm != 0)
+            progress.update()
+    progress.close()
+    return values

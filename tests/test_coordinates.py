@@ -166,3 +166,72 @@ class TestBaselineExtent:
         umax = compute_baseline_extent(u, v)
         assert umax >= np.max(np.abs(u))
         assert umax >= np.max(np.abs(v))
+
+
+class TestRadecToLmn:
+    @pytest.fixture
+    def time(self):
+        from astropy.time import Time
+
+        return Time(2459000.3, format="jd")
+
+    def _radec_of(self, alt, az, time, location):
+        import astropy.units as u
+        from astropy.coordinates import AltAz, SkyCoord
+
+        frame = AltAz(obstime=time, location=location)
+        icrs = SkyCoord(alt=alt * u.deg, az=az * u.deg, frame=frame).icrs
+        return icrs.ra.deg, icrs.dec.deg
+
+    @pytest.mark.parametrize(
+        "alt, az, expected",
+        [
+            (90.0, 0.0, (0.0, 0.0, 1.0)),  # zenith
+            (60.0, 90.0, (0.5, 0.0, np.sqrt(3) / 2)),  # East
+            (30.0, 0.0, (0.0, np.sqrt(3) / 2, 0.5)),  # North
+            (-20.0, 180.0, (0.0, -np.cos(np.deg2rad(20)), -np.sin(np.deg2rad(20)))),
+        ],
+    )
+    def test_known_directions(self, telescope_location, time, alt, az, expected):
+        from snapshot_imager import radec_to_lmn
+
+        ra, dec = self._radec_of(alt, az, time, telescope_location)
+        l, m, n = radec_to_lmn(ra, dec, time, telescope_location)
+        np.testing.assert_allclose([l.item(), m.item(), n.item()], expected, atol=1e-8)
+
+    def test_shapes_and_normalization(self, telescope_location):
+        from snapshot_imager import radec_to_lmn
+
+        times = np.linspace(2459000.2, 2459000.3, 5)
+        l, m, n = radec_to_lmn([10.0, 20.0, 30.0], [-30.0, -20.0, -10.0], times, telescope_location)
+        assert l.shape == m.shape == n.shape == (5, 3)
+        np.testing.assert_allclose(l**2 + m**2 + n**2, 1.0)
+
+    def test_mismatched_ra_dec(self, telescope_location):
+        from snapshot_imager import radec_to_lmn
+
+        with pytest.raises(ValueError, match="same shape"):
+            radec_to_lmn([10.0, 20.0], [10.0], 2459000.3, telescope_location)
+
+
+def test_phase_tracking_below_horizon_uses_negative_n(imaging_data, telescope_location):
+    """n is the sine of the elevation, including for sources below the horizon."""
+    from snapshot_imager import radec_to_lmn
+
+    d = imaging_data
+    # Cygnus A is below HERA's horizon at these times
+    l, m, n = radec_to_lmn(299.868, 40.734, d.times, telescope_location)
+    assert np.all(n < 0)
+    tracked = phase_track_to_source(
+        d.vis, d.uvw, d.times, 299.868, 40.734, telescope_location
+    )
+    phase = np.exp(
+        -2j
+        * np.pi
+        * (
+            d.uvw[:, None, 0, :] * l[None, :, 0, None]
+            + d.uvw[:, None, 1, :] * m[None, :, 0, None]
+            + d.uvw[:, None, 2, :] * n[None, :, 0, None]
+        )
+    )
+    np.testing.assert_allclose(tracked, d.vis * phase)

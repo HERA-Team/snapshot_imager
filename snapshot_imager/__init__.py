@@ -6,7 +6,7 @@ interferometry data using Non-Uniform Fast Fourier Transforms (NUFFT).
 """
 
 # Data models
-from .data_models import ImagingData, ImageResult
+from .data_models import ImagingData, ImageResult, PointsResult
 
 # Preprocessing
 # Note: unpack_uvdata is exported but raises NotImplementedError until implemented.
@@ -14,6 +14,7 @@ from .preprocessing import unpack_data_containers, unpack_uvdata
 
 # Coordinate transformations
 from .coordinates import (
+    radec_to_lmn,
     phase_track_to_source,
     compute_image_grid,
     compute_baseline_extent,
@@ -28,6 +29,7 @@ from .core import (
 # Imaging
 from .imager import (
     dirty_image,
+    dirty_image_points,
     snapshot_imager_type1,
     snapshot_imager_type3,
     snapshot_imager_mfs_type_1,
@@ -46,10 +48,12 @@ __all__ = [
     # Data models
     "ImagingData",
     "ImageResult",
+    "PointsResult",
     # Preprocessing
     "unpack_data_containers",
     "unpack_uvdata",
     # Coordinates
+    "radec_to_lmn",
     "phase_track_to_source",
     "compute_image_grid",
     "compute_baseline_extent",
@@ -58,6 +62,7 @@ __all__ = [
     "estimate_memory_requirements",
     # Imaging
     "dirty_image",
+    "dirty_image_points",
     "snapshot_imager_type1",
     "snapshot_imager_type3",
     "snapshot_imager_mfs_type_1",
